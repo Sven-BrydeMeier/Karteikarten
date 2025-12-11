@@ -1146,7 +1146,7 @@ def page_upload_and_generate():
             )
             card.id = db_insert_card(card)
 
-        st.success(f"Es wurden {len(card_specs)} Karteikarten im Deck „{deck.name}" angelegt.")
+        st.success(f"Es wurden {len(card_specs)} Karteikarten im Deck '{deck.name}' angelegt.")
 
 
 def render_card_study_ui(card: Card):
@@ -1434,7 +1434,7 @@ def page_llm_settings():
 
     if st.session_state.llm_provider == "openai":
         st.subheader("🔑 OpenAI-API-Key")
-        st.info("Den Key bekommst du im OpenAI-Dashboard unter „API Keys".")
+        st.info("Den Key bekommst du im OpenAI-Dashboard unter 'API Keys'.")
         st.session_state.openai_api_key = st.text_input(
             "OpenAI API Key",
             value=st.session_state.openai_api_key,
@@ -1443,7 +1443,7 @@ def page_llm_settings():
         )
     else:
         st.subheader("🔑 Anthropic-API-Key")
-        st.info("Den Key bekommst du im Claude-Dashboard unter „API Keys".")
+        st.info("Den Key bekommst du im Claude-Dashboard unter 'API Keys'.")
         st.session_state.anthropic_api_key = st.text_input(
             "Anthropic API Key",
             value=st.session_state.anthropic_api_key,
