@@ -424,6 +424,8 @@ def init_llm_state():
         st.session_state.current_card_index = 0
     if "current_exam" not in st.session_state:
         st.session_state.current_exam = None
+    if "study_answer_mode" not in st.session_state:
+        st.session_state.study_answer_mode = "Freitext"  # "Freitext" oder "Multiple Choice"
 
 
 init_db_schema()
@@ -1252,12 +1254,15 @@ def render_card_study_ui(card: Card):
         unsafe_allow_html=True
     )
 
-    mode = st.radio("Antwortmodus", ["Freitext", "Multiple Choice"], horizontal=True, key=f"mode_{card.id}")
+    # Verwende den vor der Sitzung gewaehlten Antwortmodus
+    mode = st.session_state.study_answer_mode
 
     result = None
     feedback = None
 
-    if mode == "Multiple Choice" and card.choices:
+    # Multiple Choice nur wenn Modus gewaehlt UND Karte MC-Optionen hat
+    if mode == "Multiple Choice" and card.choices and card.correct_choice_index is not None:
+        st.info("Modus: Multiple Choice")
         choice = st.radio("Antwort wählen:", card.choices, key=f"choice_{card.id}")
         if st.button("Antwort prüfen", key=f"check_mc_{card.id}"):
             idx = card.choices.index(choice)
@@ -1268,6 +1273,12 @@ def render_card_study_ui(card: Card):
                 result = "wrong"
                 feedback = f"❌ Falsch. Richtige Antwort: **{card.choices[card.correct_choice_index]}**"
     else:
+        # Freitext-Modus (oder MC gewuenscht aber keine Optionen verfuegbar)
+        if mode == "Multiple Choice" and (not card.choices or card.correct_choice_index is None):
+            st.warning("Diese Karte hat keine Multiple-Choice-Optionen. Bitte als Freitext beantworten.")
+        else:
+            st.info("Modus: Freitext (KI-Bewertung)")
+
         user_text = st.text_area("Deine Antwort (Freitext)", height=150, key=f"ft_{card.id}")
         col1, col2, col3 = st.columns(3)
         with col1:
@@ -1275,11 +1286,11 @@ def render_card_study_ui(card: Card):
         with col2:
             clicked_skip = st.button("Skip", key=f"skip_{card.id}")
         with col3:
-            show_solution = st.button("Lösung anzeigen", key=f"solution_{card.id}")
+            show_solution = st.button("Loesung anzeigen", key=f"solution_{card.id}")
 
         if clicked_skip:
             result = "skip"
-            feedback = "⏭ Frage wurde übersprungen. Karte wandert in den Sondertopf."
+            feedback = "⏭ Frage wurde uebersprungen. Karte wandert in den Sondertopf."
         elif clicked_check:
             eval_result = llm_evaluate_free_text_answer(user_text, card)
             if eval_result["grade"] == "correct":
@@ -1292,7 +1303,7 @@ def render_card_study_ui(card: Card):
                 result = "wrong"
                 feedback = "❌ Falsch. " + eval_result.get("explanation", "")
         elif show_solution:
-            feedback = f"📘 Musterlösung:\n\n{card.answer}\n\n{card.explanation}"
+            feedback = f"📘 Musterloesung:\n\n{card.answer}\n\n{card.explanation}"
 
     return result, feedback
 
@@ -1312,10 +1323,22 @@ def page_study_cards():
     chosen = st.selectbox("Deck auswählen", list(deck_names.keys()))
     chosen_deck_id = deck_names[chosen]
 
-    max_cards = st.slider("Anzahl Karten für diese Sitzung", 5, 50, 15)
+    col1, col2 = st.columns(2)
+    with col1:
+        max_cards = st.slider("Anzahl Karten für diese Sitzung", 5, 50, 15)
+    with col2:
+        answer_mode = st.radio(
+            "Antwortmodus",
+            ["Freitext", "Multiple Choice"],
+            index=0 if st.session_state.study_answer_mode == "Freitext" else 1,
+            horizontal=True,
+            help="Freitext: KI bewertet deine Antwort. Multiple Choice: Auswahl aus vorgegebenen Optionen."
+        )
+
     include_special = st.checkbox("Sondertopf bevorzugt einbeziehen", value=True)
 
     if st.button("Lernsitzung starten"):
+        st.session_state.study_answer_mode = answer_mode
         st.session_state.current_cards = db_select_next_due_cards(
             user_id=st.session_state.user_id,
             deck_id=chosen_deck_id,
