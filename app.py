@@ -7,8 +7,8 @@ from typing import List, Optional, Dict, Any
 from io import BytesIO
 
 import streamlit as st
-from openai import OpenAI
-from anthropic import Anthropic
+from openai import OpenAI, RateLimitError as OpenAIRateLimitError, APIError as OpenAIAPIError
+from anthropic import Anthropic, RateLimitError as AnthropicRateLimitError, APIError as AnthropicAPIError
 from PIL import Image
 import pdfplumber
 from docx import Document
@@ -497,34 +497,69 @@ def test_llm_connection():
         st.error(f"❌ Fehler bei der KI-Verbindung: {e}")
 
 
+class LLMError(Exception):
+    """Custom exception for LLM API errors with user-friendly messages."""
+    pass
+
+
 def call_llm(system_prompt: str, user_prompt: str) -> str:
     """
-    Zentrale Stelle für alle LLM-Aufrufe.
+    Zentrale Stelle für alle LLM-Aufrufe mit umfassendem Error-Handling.
     """
-    client, provider = get_llm_client()
+    try:
+        client, provider = get_llm_client()
+    except ValueError as e:
+        raise LLMError(f"Konfigurationsfehler: {e}")
 
-    if provider == "openai":
-        resp = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=0.3,
-        )
-        return resp.choices[0].message.content
+    try:
+        if provider == "openai":
+            resp = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.3,
+            )
+            return resp.choices[0].message.content
 
-    else:  # anthropic
-        resp = client.messages.create(
-            model="claude-3-5-sonnet-20240620",
-            max_tokens=4096,
-            temperature=0.3,
-            system=system_prompt,
-            messages=[
-                {"role": "user", "content": user_prompt},
-            ],
+        else:  # anthropic
+            resp = client.messages.create(
+                model="claude-3-5-sonnet-20240620",
+                max_tokens=4096,
+                temperature=0.3,
+                system=system_prompt,
+                messages=[
+                    {"role": "user", "content": user_prompt},
+                ],
+            )
+            return resp.content[0].text
+
+    except OpenAIRateLimitError:
+        raise LLMError(
+            "OpenAI Rate-Limit erreicht. Moegliche Ursachen:\n"
+            "- Kein Guthaben auf dem OpenAI-Account\n"
+            "- Zu viele Anfragen in kurzer Zeit\n\n"
+            "Loesungen:\n"
+            "1. Guthaben pruefen: https://platform.openai.com/usage\n"
+            "2. Zahlungsmethode hinzufuegen\n"
+            "3. Alternativ zu Claude (Anthropic) wechseln"
         )
-        return resp.content[0].text
+    except OpenAIAPIError as e:
+        raise LLMError(f"OpenAI API-Fehler: {e}")
+    except AnthropicRateLimitError:
+        raise LLMError(
+            "Anthropic Rate-Limit erreicht. Moegliche Ursachen:\n"
+            "- Kein Guthaben auf dem Anthropic-Account\n"
+            "- Zu viele Anfragen in kurzer Zeit\n\n"
+            "Loesungen:\n"
+            "1. Guthaben pruefen: https://console.anthropic.com/\n"
+            "2. Alternativ zu OpenAI wechseln"
+        )
+    except AnthropicAPIError as e:
+        raise LLMError(f"Anthropic API-Fehler: {e}")
+    except Exception as e:
+        raise LLMError(f"Unerwarteter Fehler bei der KI-Anfrage: {e}")
 
 
 # ============================================================
@@ -797,7 +832,11 @@ def llm_generate_flashcards(text: str, subject: str, topic: str, difficulty: str
             text=text,
         )
 
-    raw = call_llm(FLASHCARD_SYSTEM_PROMPT, user_prompt)
+    try:
+        raw = call_llm(FLASHCARD_SYSTEM_PROMPT, user_prompt)
+    except LLMError as e:
+        st.error(f"KI-Fehler: {e}")
+        return []
 
     try:
         cards = json.loads(raw)
@@ -844,7 +883,14 @@ def llm_evaluate_free_text_answer(user_answer: str, card: Card) -> Dict[str, Any
             user_answer=user_answer,
         )
 
-    raw = call_llm(system_prompt, user_prompt)
+    try:
+        raw = call_llm(system_prompt, user_prompt)
+    except LLMError as e:
+        st.error(f"KI-Fehler: {e}")
+        return {
+            "grade": "partial",
+            "explanation": "KI-Fehler bei der Auswertung. Antwort wird als 'teilweise richtig' behandelt."
+        }
 
     try:
         result = json.loads(raw)
@@ -888,7 +934,11 @@ def llm_generate_exam(subject: str, topic: str, duration_minutes: int, level: st
             mode=mode,
         )
 
-    raw = call_llm(system_prompt, user_prompt)
+    try:
+        raw = call_llm(system_prompt, user_prompt)
+    except LLMError as e:
+        st.error(f"KI-Fehler: {e}")
+        return {"questions": []}
 
     try:
         data = json.loads(raw)
