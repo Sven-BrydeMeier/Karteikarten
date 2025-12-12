@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import sqlite3
 import datetime as dt
@@ -811,6 +812,49 @@ Nur JSON mit "questions".
 # 6. KI-Funktionen (Karten, Bewertung, Exam)
 # ============================================================
 
+def extract_json_from_response(raw: str) -> Any:
+    """
+    Extrahiert JSON aus einer KI-Antwort, auch wenn diese in Markdown
+    Code-Bloecken oder mit zusaetzlichem Text umgeben ist.
+    """
+    if not raw or not raw.strip():
+        raise ValueError("Leere Antwort von der KI erhalten.")
+
+    text = raw.strip()
+
+    # Versuch 1: Direktes Parsen
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # Versuch 2: JSON aus Markdown Code-Block extrahieren (```json ... ```)
+    code_block_match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', text)
+    if code_block_match:
+        try:
+            return json.loads(code_block_match.group(1))
+        except json.JSONDecodeError:
+            pass
+
+    # Versuch 3: JSON-Array finden ([...])
+    array_match = re.search(r'\[[\s\S]*\]', text)
+    if array_match:
+        try:
+            return json.loads(array_match.group(0))
+        except json.JSONDecodeError:
+            pass
+
+    # Versuch 4: JSON-Objekt finden ({...})
+    obj_match = re.search(r'\{[\s\S]*\}', text)
+    if obj_match:
+        try:
+            return json.loads(obj_match.group(0))
+        except json.JSONDecodeError:
+            pass
+
+    raise ValueError(f"Kein gueltiges JSON in der Antwort gefunden. Antwort beginnt mit: {text[:100]}...")
+
+
 def llm_generate_flashcards(text: str, subject: str, topic: str, difficulty: str) -> List[Dict[str, Any]]:
     if subject == "Rechtswissenschaften":
         user_prompt = JURA_FLASHCARD_USER_PROMPT.format(
@@ -839,14 +883,15 @@ def llm_generate_flashcards(text: str, subject: str, topic: str, difficulty: str
         return []
 
     try:
-        cards = json.loads(raw)
+        cards = extract_json_from_response(raw)
         if not isinstance(cards, list):
             raise ValueError("Antwort ist kein JSON-Array.")
         return cards
-    except Exception as e:
+    except ValueError as e:
         st.error(f"Fehler beim Parsen der Karten-Antwort: {e}")
-        st.text("Rohantwort der KI:")
-        st.code(raw)
+        if raw:
+            with st.expander("Rohantwort der KI anzeigen"):
+                st.code(raw)
         return []
 
 
@@ -893,14 +938,12 @@ def llm_evaluate_free_text_answer(user_answer: str, card: Card) -> Dict[str, Any
         }
 
     try:
-        result = json.loads(raw)
+        result = extract_json_from_response(raw)
         if not isinstance(result, dict):
             raise ValueError("Antwort ist kein JSON-Objekt.")
         return result
-    except Exception as e:
+    except ValueError as e:
         st.error(f"Fehler beim Parsen der Bewertungs-Antwort: {e}")
-        st.text("Rohantwort der KI:")
-        st.code(raw)
         return {
             "grade": "partial",
             "explanation": "Fehler bei der KI-Auswertung. Antwort wird als 'teilweise richtig' behandelt."
@@ -941,14 +984,15 @@ def llm_generate_exam(subject: str, topic: str, duration_minutes: int, level: st
         return {"questions": []}
 
     try:
-        data = json.loads(raw)
+        data = extract_json_from_response(raw)
         if not isinstance(data, dict) or "questions" not in data:
-            raise ValueError("Antwort enthält kein 'questions'-Feld.")
+            raise ValueError("Antwort enthaelt kein 'questions'-Feld.")
         return data
-    except Exception as e:
-        st.error(f"Fehler beim Parsen der Prüfungs-Antwort: {e}")
-        st.text("Rohantwort der KI:")
-        st.code(raw)
+    except ValueError as e:
+        st.error(f"Fehler beim Parsen der Pruefungs-Antwort: {e}")
+        if raw:
+            with st.expander("Rohantwort der KI anzeigen"):
+                st.code(raw)
         return {"questions": []}
 
 
