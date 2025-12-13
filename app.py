@@ -20,6 +20,10 @@ from dotenv import load_dotenv
 # 0. Grund-Konfiguration Streamlit & .env
 # ============================================================
 
+# App-Version
+APP_VERSION = "1.0.0"
+APP_LAST_UPDATE = "2024-12-13 15:30"
+
 load_dotenv()  # .env-Datei laden, falls vorhanden
 
 st.set_page_config(
@@ -1598,3 +1602,8 @@ PAGES = {
 st.sidebar.title("Navigation")
 choice = st.sidebar.radio("Menü", list(PAGES.keys()))
 PAGES[choice]()
+
+# Versionsanzeige in der Sidebar
+st.sidebar.markdown("---")
+st.sidebar.caption(f"Version {APP_VERSION}")
+st.sidebar.caption(f"Stand: {APP_LAST_UPDATE}")
