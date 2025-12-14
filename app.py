@@ -25,7 +25,7 @@ from dotenv import load_dotenv
 # ============================================================
 
 # App-Version
-APP_VERSION = "2.0.0"
+APP_VERSION = "2.1.0"
 APP_LAST_UPDATE = "2025-12-14 12:00"
 
 load_dotenv()  # .env-Datei laden, falls vorhanden
@@ -117,6 +117,40 @@ ACHIEVEMENTS = {
     "deck_master": {"name": "Deckmeister", "desc": "Ein Deck komplett gemeistert", "icon": "👑", "xp": 500},
     "audio_learner": {"name": "Hörer", "desc": "Audio-Lernmodus genutzt", "icon": "🎧", "xp": 75},
     "exam_passed": {"name": "Prüfungsbereit", "desc": "Erste Prüfungssimulation", "icon": "🎓", "xp": 150},
+    # Multiplayer Achievements
+    "first_duel": {"name": "Herausforderer", "desc": "Erstes Duell gespielt", "icon": "⚔️", "xp": 100},
+    "duel_winner": {"name": "Duellant", "desc": "Erstes Duell gewonnen", "icon": "🥇", "xp": 200},
+    "duel_master": {"name": "Duellmeister", "desc": "10 Duelle gewonnen", "icon": "🏅", "xp": 500},
+    "group_founder": {"name": "Gruppengruender", "desc": "Erste Lerngruppe erstellt", "icon": "👥", "xp": 150},
+    "team_player": {"name": "Teamplayer", "desc": "Einer Lerngruppe beigetreten", "icon": "🤝", "xp": 100},
+    "weekly_champion": {"name": "Wochen-Champion", "desc": "Wochen-Challenge gewonnen", "icon": "🎖️", "xp": 300},
+}
+
+# Multiplayer & Rang-System Konstanten
+RANK_SYSTEM = {
+    "bronze": {"name": "Bronze", "icon": "🥉", "min_xp": 0, "color": "#CD7F32"},
+    "silver": {"name": "Silber", "icon": "🥈", "min_xp": 1000, "color": "#C0C0C0"},
+    "gold": {"name": "Gold", "icon": "🥇", "min_xp": 5000, "color": "#FFD700"},
+    "platinum": {"name": "Platin", "icon": "💎", "min_xp": 15000, "color": "#E5E4E2"},
+    "diamond": {"name": "Diamant", "icon": "💠", "min_xp": 35000, "color": "#B9F2FF"},
+    "master": {"name": "Meister", "icon": "👑", "min_xp": 75000, "color": "#9400D3"},
+}
+
+CHALLENGE_TYPES = {
+    "daily_cards": {"name": "Tages-Challenge", "desc": "Lerne {target} Karten heute", "icon": "📅", "xp": 50},
+    "weekly_streak": {"name": "Wochen-Streak", "desc": "Halte deinen Streak 7 Tage", "icon": "🔥", "xp": 200},
+    "perfect_round": {"name": "Perfekte Runde", "desc": "10 Karten ohne Fehler", "icon": "💯", "xp": 100},
+    "speed_demon": {"name": "Blitzschnell", "desc": "20 Karten in 5 Minuten", "icon": "⚡", "xp": 150},
+    "group_challenge": {"name": "Gruppen-Challenge", "desc": "Gemeinsam {target} Karten", "icon": "👥", "xp": 300},
+}
+
+# Duell-Einstellungen
+DUEL_SETTINGS = {
+    "questions_per_round": 10,
+    "time_per_question": 30,  # Sekunden
+    "xp_per_win": 50,
+    "xp_per_correct": 5,
+    "xp_bonus_perfect": 100,
 }
 
 # Fach-Farbcode
@@ -223,6 +257,82 @@ class ClozeCard:
     explanation: str = ""
     box: int = 1
     due_date: dt.date = field(default_factory=lambda: dt.date.today())
+
+
+# ============================================================
+# 1b. Multiplayer Datenmodelle
+# ============================================================
+
+@dataclass
+class LearningGroup:
+    """Lerngruppe fuer gemeinsames Lernen und Wettbewerbe."""
+    id: int
+    name: str
+    description: str
+    creator_id: int
+    join_code: str  # 8-stelliger Code zum Beitreten
+    created_at: dt.datetime
+    is_public: bool = False
+    max_members: int = 20
+    weekly_xp_goal: int = 1000
+
+
+@dataclass
+class GroupMember:
+    """Mitglied einer Lerngruppe."""
+    id: int
+    group_id: int
+    user_id: int
+    username: str
+    joined_at: dt.datetime
+    role: str = "member"  # "admin", "member"
+    weekly_xp: int = 0
+    total_group_xp: int = 0
+
+
+@dataclass
+class Duel:
+    """Quiz-Duell zwischen zwei Spielern."""
+    id: int
+    challenger_id: int
+    opponent_id: int
+    deck_id: Optional[int]  # None = gemischte Karten
+    status: str  # "pending", "active", "completed", "declined"
+    created_at: dt.datetime
+    challenger_score: int = 0
+    opponent_score: int = 0
+    current_question: int = 0
+    winner_id: Optional[int] = None
+
+
+@dataclass
+class Challenge:
+    """Tages- oder Wochen-Challenge."""
+    id: int
+    challenge_type: str
+    target_value: int
+    start_date: dt.date
+    end_date: dt.date
+    group_id: Optional[int]  # None = persoenliche Challenge
+    xp_reward: int
+    is_completed: bool = False
+
+
+@dataclass
+class UserProfile:
+    """Erweitertes Benutzerprofil fuer Multiplayer.
+
+    HINWEIS: Fuer echtes Multiplayer wird ein Backend benoetigt (z.B. Supabase).
+    Diese Struktur ist vorbereitet fuer spaetere Backend-Integration.
+    """
+    user_id: int
+    username: str
+    display_name: str
+    avatar_emoji: str = "👤"
+    rank: str = "bronze"
+    duels_won: int = 0
+    duels_played: int = 0
+    groups: List[int] = field(default_factory=list)
 
 
 # ============================================================
@@ -356,6 +466,109 @@ def init_db_schema():
             topic TEXT
         )
         """)
+
+        # ============================================================
+        # MULTIPLAYER TABELLEN
+        # HINWEIS: Diese Tabellen sind fuer lokale Demo vorbereitet.
+        # Fuer echtes Multiplayer wird ein Backend benoetigt (z.B. Supabase).
+        # ============================================================
+
+        # Benutzerprofile fuer Multiplayer
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS user_profiles (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT UNIQUE NOT NULL,
+            display_name TEXT NOT NULL,
+            avatar_emoji TEXT DEFAULT '👤',
+            rank TEXT DEFAULT 'bronze',
+            duels_won INTEGER DEFAULT 0,
+            duels_played INTEGER DEFAULT 0,
+            created_at TEXT NOT NULL
+        )
+        """)
+
+        # Lerngruppen
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS learning_groups (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            description TEXT,
+            creator_id INTEGER NOT NULL,
+            join_code TEXT UNIQUE NOT NULL,
+            created_at TEXT NOT NULL,
+            is_public INTEGER DEFAULT 0,
+            max_members INTEGER DEFAULT 20,
+            weekly_xp_goal INTEGER DEFAULT 1000
+        )
+        """)
+
+        # Gruppen-Mitgliedschaften
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS group_members (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            group_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            username TEXT NOT NULL,
+            joined_at TEXT NOT NULL,
+            role TEXT DEFAULT 'member',
+            weekly_xp INTEGER DEFAULT 0,
+            total_group_xp INTEGER DEFAULT 0,
+            FOREIGN KEY(group_id) REFERENCES learning_groups(id),
+            UNIQUE(group_id, user_id)
+        )
+        """)
+
+        # Duelle
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS duels (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            challenger_id INTEGER NOT NULL,
+            opponent_id INTEGER NOT NULL,
+            deck_id INTEGER,
+            status TEXT DEFAULT 'pending',
+            created_at TEXT NOT NULL,
+            challenger_score INTEGER DEFAULT 0,
+            opponent_score INTEGER DEFAULT 0,
+            current_question INTEGER DEFAULT 0,
+            questions_json TEXT,
+            winner_id INTEGER,
+            FOREIGN KEY(deck_id) REFERENCES decks(id)
+        )
+        """)
+
+        # Challenges (Tages-/Wochen-Herausforderungen)
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS challenges (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            group_id INTEGER,
+            challenge_type TEXT NOT NULL,
+            target_value INTEGER NOT NULL,
+            current_value INTEGER DEFAULT 0,
+            start_date TEXT NOT NULL,
+            end_date TEXT NOT NULL,
+            xp_reward INTEGER NOT NULL,
+            is_completed INTEGER DEFAULT 0,
+            FOREIGN KEY(group_id) REFERENCES learning_groups(id)
+        )
+        """)
+
+        # Gruppen-Leaderboard (wöchentlich)
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS group_leaderboard (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            group_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            username TEXT NOT NULL,
+            week_start TEXT NOT NULL,
+            xp_earned INTEGER DEFAULT 0,
+            cards_learned INTEGER DEFAULT 0,
+            duels_won INTEGER DEFAULT 0,
+            FOREIGN KEY(group_id) REFERENCES learning_groups(id),
+            UNIQUE(group_id, user_id, week_start)
+        )
+        """)
+
         conn.commit()
 
 
@@ -1059,6 +1272,370 @@ def db_get_cloze_cards(deck_id: int, user_id: int) -> List[Dict]:
 
 
 # ============================================================
+# 2f. Multiplayer Datenbank-Funktionen
+# HINWEIS: Fuer echtes Multiplayer wird ein Backend benoetigt.
+# Diese Funktionen simulieren Multiplayer lokal.
+# ============================================================
+
+def get_user_rank(xp: int) -> Dict:
+    """Ermittelt den Rang basierend auf XP."""
+    current_rank = RANK_SYSTEM["bronze"]
+    for rank_id, rank_data in RANK_SYSTEM.items():
+        if xp >= rank_data["min_xp"]:
+            current_rank = {**rank_data, "id": rank_id}
+    return current_rank
+
+
+def get_or_create_user_profile(user_id: int, username: str = None) -> Dict:
+    """Holt oder erstellt ein Benutzerprofil."""
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        c.execute("SELECT * FROM user_profiles WHERE user_id=?", (user_id,))
+        row = c.fetchone()
+
+        if row:
+            return dict(row)
+
+        # Neues Profil erstellen
+        if not username:
+            username = f"Spieler_{user_id}"
+
+        c.execute("""
+            INSERT INTO user_profiles (user_id, username, display_name, created_at)
+            VALUES (?, ?, ?, ?)
+        """, (user_id, username, username, dt.datetime.now().isoformat()))
+        conn.commit()
+
+        return {
+            "user_id": user_id,
+            "username": username,
+            "display_name": username,
+            "avatar_emoji": "👤",
+            "rank": "bronze",
+            "duels_won": 0,
+            "duels_played": 0
+        }
+
+
+def db_update_user_profile(user_id: int, **kwargs):
+    """Aktualisiert Benutzerprofil-Felder."""
+    allowed_fields = ["username", "display_name", "avatar_emoji", "rank", "duels_won", "duels_played"]
+    updates = {k: v for k, v in kwargs.items() if k in allowed_fields}
+
+    if not updates:
+        return
+
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        set_clause = ", ".join([f"{k}=?" for k in updates.keys()])
+        values = list(updates.values()) + [user_id]
+        c.execute(f"UPDATE user_profiles SET {set_clause} WHERE user_id=?", values)
+        conn.commit()
+
+
+def db_create_learning_group(name: str, description: str, creator_id: int, creator_username: str) -> Dict:
+    """Erstellt eine neue Lerngruppe."""
+    join_code = hashlib.md5(f"{name}-{creator_id}-{dt.datetime.now().isoformat()}".encode()).hexdigest()[:8].upper()
+
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        now = dt.datetime.now().isoformat()
+
+        c.execute("""
+            INSERT INTO learning_groups (name, description, creator_id, join_code, created_at)
+            VALUES (?, ?, ?, ?, ?)
+        """, (name, description, creator_id, join_code, now))
+        group_id = c.lastrowid
+
+        # Ersteller als Admin hinzufuegen
+        c.execute("""
+            INSERT INTO group_members (group_id, user_id, username, joined_at, role)
+            VALUES (?, ?, ?, ?, 'admin')
+        """, (group_id, creator_id, creator_username, now))
+
+        conn.commit()
+
+        return {
+            "id": group_id,
+            "name": name,
+            "description": description,
+            "join_code": join_code,
+            "creator_id": creator_id
+        }
+
+
+def db_join_group_by_code(join_code: str, user_id: int, username: str) -> Tuple[bool, str]:
+    """Tritt einer Gruppe per Code bei."""
+    with get_db_connection() as conn:
+        c = conn.cursor()
+
+        # Gruppe finden
+        c.execute("SELECT * FROM learning_groups WHERE join_code=?", (join_code.upper(),))
+        group = c.fetchone()
+
+        if not group:
+            return False, "Gruppe nicht gefunden. Pruefe den Beitrittscode."
+
+        # Pruefen ob bereits Mitglied
+        c.execute("SELECT * FROM group_members WHERE group_id=? AND user_id=?",
+                 (group["id"], user_id))
+        if c.fetchone():
+            return False, "Du bist bereits Mitglied dieser Gruppe."
+
+        # Pruefen ob Gruppe voll
+        c.execute("SELECT COUNT(*) as count FROM group_members WHERE group_id=?", (group["id"],))
+        member_count = c.fetchone()["count"]
+        if member_count >= group["max_members"]:
+            return False, "Diese Gruppe ist bereits voll."
+
+        # Beitreten
+        c.execute("""
+            INSERT INTO group_members (group_id, user_id, username, joined_at)
+            VALUES (?, ?, ?, ?)
+        """, (group["id"], user_id, username, dt.datetime.now().isoformat()))
+        conn.commit()
+
+        return True, f"Willkommen in der Gruppe '{group['name']}'!"
+
+
+def db_get_user_groups(user_id: int) -> List[Dict]:
+    """Holt alle Gruppen eines Benutzers."""
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        c.execute("""
+            SELECT g.*, gm.role, gm.weekly_xp, gm.total_group_xp
+            FROM learning_groups g
+            JOIN group_members gm ON g.id = gm.group_id
+            WHERE gm.user_id=?
+            ORDER BY g.created_at DESC
+        """, (user_id,))
+        return [dict(row) for row in c.fetchall()]
+
+
+def db_get_group_members(group_id: int) -> List[Dict]:
+    """Holt alle Mitglieder einer Gruppe mit Statistiken."""
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        c.execute("""
+            SELECT gm.*, us.total_xp, us.level, us.current_streak
+            FROM group_members gm
+            LEFT JOIN user_stats us ON gm.user_id = us.user_id
+            WHERE gm.group_id=?
+            ORDER BY gm.weekly_xp DESC
+        """, (group_id,))
+        return [dict(row) for row in c.fetchall()]
+
+
+def db_get_group_leaderboard(group_id: int, week_start: str = None) -> List[Dict]:
+    """Holt das Wochen-Leaderboard einer Gruppe."""
+    if not week_start:
+        # Aktuelle Woche (Montag)
+        today = dt.date.today()
+        week_start = (today - dt.timedelta(days=today.weekday())).isoformat()
+
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        c.execute("""
+            SELECT * FROM group_leaderboard
+            WHERE group_id=? AND week_start=?
+            ORDER BY xp_earned DESC
+        """, (group_id, week_start))
+        return [dict(row) for row in c.fetchall()]
+
+
+def db_update_group_leaderboard(group_id: int, user_id: int, username: str, xp_earned: int = 0, cards_learned: int = 0):
+    """Aktualisiert den Leaderboard-Eintrag eines Benutzers."""
+    today = dt.date.today()
+    week_start = (today - dt.timedelta(days=today.weekday())).isoformat()
+
+    with get_db_connection() as conn:
+        c = conn.cursor()
+
+        # Versuche Update
+        c.execute("""
+            UPDATE group_leaderboard
+            SET xp_earned = xp_earned + ?, cards_learned = cards_learned + ?
+            WHERE group_id=? AND user_id=? AND week_start=?
+        """, (xp_earned, cards_learned, group_id, user_id, week_start))
+
+        if c.rowcount == 0:
+            # Neuer Eintrag
+            c.execute("""
+                INSERT INTO group_leaderboard (group_id, user_id, username, week_start, xp_earned, cards_learned)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (group_id, user_id, username, week_start, xp_earned, cards_learned))
+
+        # Auch weekly_xp in group_members aktualisieren
+        c.execute("""
+            UPDATE group_members
+            SET weekly_xp = weekly_xp + ?, total_group_xp = total_group_xp + ?
+            WHERE group_id=? AND user_id=?
+        """, (xp_earned, xp_earned, group_id, user_id))
+
+        conn.commit()
+
+
+def db_create_duel(challenger_id: int, opponent_id: int, deck_id: int = None) -> int:
+    """Erstellt ein neues Duell."""
+    with get_db_connection() as conn:
+        c = conn.cursor()
+
+        # Fragen fuer das Duell vorbereiten
+        if deck_id:
+            c.execute("SELECT * FROM cards WHERE deck_id=? ORDER BY RANDOM() LIMIT ?",
+                     (deck_id, DUEL_SETTINGS["questions_per_round"]))
+        else:
+            c.execute("SELECT * FROM cards WHERE user_id IN (?, ?) ORDER BY RANDOM() LIMIT ?",
+                     (challenger_id, opponent_id, DUEL_SETTINGS["questions_per_round"]))
+
+        questions = [dict(row) for row in c.fetchall()]
+        questions_json = json.dumps([{
+            "id": q["id"],
+            "question": q["question"],
+            "answer": q["answer"],
+            "choices": json.loads(q["choices_json"]) if q["choices_json"] else None,
+            "correct_choice_index": q["correct_choice_index"]
+        } for q in questions])
+
+        c.execute("""
+            INSERT INTO duels (challenger_id, opponent_id, deck_id, created_at, questions_json)
+            VALUES (?, ?, ?, ?, ?)
+        """, (challenger_id, opponent_id, deck_id, dt.datetime.now().isoformat(), questions_json))
+
+        conn.commit()
+        return c.lastrowid
+
+
+def db_get_active_duels(user_id: int) -> List[Dict]:
+    """Holt aktive Duelle eines Benutzers."""
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        c.execute("""
+            SELECT d.*,
+                   p1.username as challenger_name,
+                   p2.username as opponent_name
+            FROM duels d
+            LEFT JOIN user_profiles p1 ON d.challenger_id = p1.user_id
+            LEFT JOIN user_profiles p2 ON d.opponent_id = p2.user_id
+            WHERE (d.challenger_id=? OR d.opponent_id=?)
+              AND d.status IN ('pending', 'active')
+            ORDER BY d.created_at DESC
+        """, (user_id, user_id))
+        return [dict(row) for row in c.fetchall()]
+
+
+def db_update_duel_score(duel_id: int, user_id: int, correct: bool):
+    """Aktualisiert den Duell-Punktestand."""
+    with get_db_connection() as conn:
+        c = conn.cursor()
+
+        # Ermittle ob Challenger oder Opponent
+        c.execute("SELECT * FROM duels WHERE id=?", (duel_id,))
+        duel = c.fetchone()
+
+        if not duel:
+            return
+
+        if user_id == duel["challenger_id"]:
+            score_field = "challenger_score"
+        else:
+            score_field = "opponent_score"
+
+        if correct:
+            c.execute(f"UPDATE duels SET {score_field} = {score_field} + 1 WHERE id=?", (duel_id,))
+
+        c.execute("UPDATE duels SET current_question = current_question + 1 WHERE id=?", (duel_id,))
+        conn.commit()
+
+
+def db_complete_duel(duel_id: int) -> Dict:
+    """Beendet ein Duell und ermittelt den Gewinner."""
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        c.execute("SELECT * FROM duels WHERE id=?", (duel_id,))
+        duel = dict(c.fetchone())
+
+        winner_id = None
+        if duel["challenger_score"] > duel["opponent_score"]:
+            winner_id = duel["challenger_id"]
+        elif duel["opponent_score"] > duel["challenger_score"]:
+            winner_id = duel["opponent_id"]
+        # Bei Gleichstand: kein Gewinner
+
+        c.execute("UPDATE duels SET status='completed', winner_id=? WHERE id=?", (winner_id, duel_id))
+
+        # Statistiken aktualisieren
+        c.execute("UPDATE user_profiles SET duels_played = duels_played + 1 WHERE user_id IN (?, ?)",
+                 (duel["challenger_id"], duel["opponent_id"]))
+
+        if winner_id:
+            c.execute("UPDATE user_profiles SET duels_won = duels_won + 1 WHERE user_id=?", (winner_id,))
+
+        conn.commit()
+
+        return {**duel, "winner_id": winner_id}
+
+
+def db_create_challenge(user_id: int, challenge_type: str, target: int, days: int = 1, group_id: int = None) -> int:
+    """Erstellt eine neue Challenge."""
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        start_date = dt.date.today()
+        end_date = start_date + dt.timedelta(days=days)
+        xp_reward = CHALLENGE_TYPES.get(challenge_type, {}).get("xp", 50)
+
+        c.execute("""
+            INSERT INTO challenges (user_id, group_id, challenge_type, target_value, start_date, end_date, xp_reward)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (user_id, group_id, challenge_type, target, start_date.isoformat(), end_date.isoformat(), xp_reward))
+        conn.commit()
+        return c.lastrowid
+
+
+def db_get_active_challenges(user_id: int) -> List[Dict]:
+    """Holt aktive Challenges eines Benutzers."""
+    today = dt.date.today().isoformat()
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        c.execute("""
+            SELECT * FROM challenges
+            WHERE (user_id=? OR group_id IN (SELECT group_id FROM group_members WHERE user_id=?))
+              AND end_date >= ?
+              AND is_completed = 0
+            ORDER BY end_date ASC
+        """, (user_id, user_id, today))
+        return [dict(row) for row in c.fetchall()]
+
+
+def db_update_challenge_progress(user_id: int, challenge_type: str, increment: int = 1):
+    """Aktualisiert den Fortschritt einer Challenge."""
+    today = dt.date.today().isoformat()
+    with get_db_connection() as conn:
+        c = conn.cursor()
+
+        # Finde passende aktive Challenges
+        c.execute("""
+            SELECT * FROM challenges
+            WHERE user_id=? AND challenge_type=? AND end_date >= ? AND is_completed = 0
+        """, (user_id, challenge_type, today))
+
+        for challenge in c.fetchall():
+            new_value = challenge["current_value"] + increment
+
+            if new_value >= challenge["target_value"]:
+                # Challenge abgeschlossen!
+                c.execute("""
+                    UPDATE challenges SET current_value=?, is_completed=1 WHERE id=?
+                """, (new_value, challenge["id"]))
+            else:
+                c.execute("""
+                    UPDATE challenges SET current_value=? WHERE id=?
+                """, (new_value, challenge["id"]))
+
+        conn.commit()
+
+
+# ============================================================
 # 3. Session-State Initialisierung (User & KI)
 # ============================================================
 
@@ -1125,12 +1702,36 @@ def init_tutor_state():
         st.session_state.tutor_topic = None
 
 
+def init_multiplayer_state():
+    """Initialisiert Multiplayer Session States.
+
+    HINWEIS für Backend-Migration:
+    - In einer Multiplayer-Umgebung sollten viele dieser Daten
+      serverseitig in Echtzeit synchronisiert werden (z.B. via Supabase Realtime)
+    - Duelle und Challenges benötigen Server-side Validierung
+    """
+    if "current_group_id" not in st.session_state:
+        st.session_state.current_group_id = None
+    if "active_duel" not in st.session_state:
+        st.session_state.active_duel = None
+    if "duel_answers" not in st.session_state:
+        st.session_state.duel_answers = []
+    if "duel_start_time" not in st.session_state:
+        st.session_state.duel_start_time = None
+    if "multiplayer_username" not in st.session_state:
+        # HINWEIS: In Produktion sollte dies über Auth (z.B. Supabase Auth) laufen
+        st.session_state.multiplayer_username = f"Spieler_{st.session_state.user_id}"
+    if "user_profile" not in st.session_state:
+        st.session_state.user_profile = None
+
+
 init_db_schema()
 init_state()
 init_llm_state()
 init_gamification_state()
 init_pomodoro_state()
 init_tutor_state()
+init_multiplayer_state()
 
 # Study-Plan aus DB holen (oder anlegen)
 st.session_state.study_plan = get_or_create_study_plan(st.session_state.user_id)
@@ -3128,6 +3729,565 @@ def page_cloze_cards():
 
 
 # ============================================================
+# 9b. Multiplayer / Lerngruppen Seiten
+# ============================================================
+
+def render_rank_badge(rank_id: str) -> str:
+    """Rendert ein Rang-Badge als HTML."""
+    rank = RANK_SYSTEM.get(rank_id, RANK_SYSTEM["bronze"])
+    return f'<span style="background:{rank["color"]}; padding:2px 8px; border-radius:10px; color:#fff;">{rank["icon"]} {rank["name"]}</span>'
+
+
+def page_multiplayer_hub():
+    """Hauptseite für alle Multiplayer-Features.
+
+    HINWEIS für Backend-Migration:
+    - Diese Seite sollte Echtzeit-Updates via WebSocket/Supabase Realtime erhalten
+    - Benutzer-Authentifizierung ist zwingend erforderlich für Multiplayer
+    - Rate-Limiting für API-Calls implementieren
+    """
+    st.title("👥 Multiplayer & Lerngruppen")
+
+    st.info("""
+    **Hinweis:** Multiplayer-Features sind für den lokalen Test vorbereitet.
+    Für echte Mehrspieler-Funktionen wird ein Backend (z.B. Supabase) benötigt.
+
+    **Was du hier testen kannst:**
+    - Lerngruppen erstellen und verwalten
+    - Simulations-Duelle gegen dich selbst
+    - Challenges und Rang-System
+    """)
+
+    # Benutzerprofil laden/erstellen
+    if st.session_state.user_profile is None:
+        st.session_state.user_profile = get_or_create_user_profile(
+            st.session_state.user_id,
+            st.session_state.multiplayer_username
+        )
+
+    profile = st.session_state.user_profile
+    stats = st.session_state.user_stats
+
+    # Profil-Übersicht
+    st.markdown("### 👤 Dein Profil")
+
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        current_rank = get_user_rank(stats.get("total_xp", 0))
+        st.markdown(f"""
+        <div class="metric-card" style="text-align:center;">
+            <div style="font-size:3rem;">{current_rank['icon']}</div>
+            <div style="font-weight:bold;">{current_rank['name']}</div>
+            <div style="font-size:0.8rem;color:#888;">Aktueller Rang</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with col2:
+        st.metric("Gesamte XP", f"{stats.get('total_xp', 0):,}")
+
+    with col3:
+        duels_won = profile.get("duels_won", 0) if isinstance(profile, dict) else 0
+        duels_played = profile.get("duels_played", 0) if isinstance(profile, dict) else 0
+        win_rate = (duels_won / duels_played * 100) if duels_played > 0 else 0
+        st.metric("Duelle gewonnen", f"{duels_won}/{duels_played}", f"{win_rate:.0f}%")
+
+    with col4:
+        groups = db_get_user_groups(st.session_state.user_id)
+        st.metric("Lerngruppen", len(groups))
+
+    # Rang-Fortschritt
+    st.markdown("### 📈 Rang-Fortschritt")
+    total_xp = stats.get("total_xp", 0)
+    current_rank_data = get_user_rank(total_xp)
+
+    # Nächsten Rang finden
+    next_rank = None
+    for rank_id, rank_data in RANK_SYSTEM.items():
+        if rank_data["min_xp"] > total_xp:
+            next_rank = rank_data
+            break
+
+    if next_rank:
+        progress = (total_xp - current_rank_data["min_xp"]) / (next_rank["min_xp"] - current_rank_data["min_xp"])
+        st.progress(min(progress, 1.0))
+        st.caption(f"{total_xp:,} / {next_rank['min_xp']:,} XP bis {next_rank['icon']} {next_rank['name']}")
+    else:
+        st.progress(1.0)
+        st.caption(f"🎉 Maximaler Rang erreicht! ({total_xp:,} XP)")
+
+    # Schnellzugriff
+    st.markdown("---")
+    st.markdown("### 🚀 Schnellzugriff")
+
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        st.markdown("""
+        <div class="card" style="padding:20px; text-align:center;">
+            <div style="font-size:2rem;">👥</div>
+            <div style="font-weight:bold;">Lerngruppen</div>
+            <div style="font-size:0.9rem;color:#888;">Zusammen lernen</div>
+        </div>
+        """, unsafe_allow_html=True)
+        if st.button("Zu Lerngruppen", key="nav_groups"):
+            st.session_state.mp_subpage = "groups"
+            st.rerun()
+
+    with col2:
+        st.markdown("""
+        <div class="card" style="padding:20px; text-align:center;">
+            <div style="font-size:2rem;">⚔️</div>
+            <div style="font-weight:bold;">Quiz-Duelle</div>
+            <div style="font-size:0.9rem;color:#888;">Wissen duellieren</div>
+        </div>
+        """, unsafe_allow_html=True)
+        if st.button("Zu Duellen", key="nav_duels"):
+            st.session_state.mp_subpage = "duels"
+            st.rerun()
+
+    with col3:
+        st.markdown("""
+        <div class="card" style="padding:20px; text-align:center;">
+            <div style="font-size:2rem;">🏆</div>
+            <div style="font-weight:bold;">Challenges</div>
+            <div style="font-size:0.9rem;color:#888;">Ziele erreichen</div>
+        </div>
+        """, unsafe_allow_html=True)
+        if st.button("Zu Challenges", key="nav_challenges"):
+            st.session_state.mp_subpage = "challenges"
+            st.rerun()
+
+    # Unterseite anzeigen
+    if "mp_subpage" in st.session_state:
+        st.markdown("---")
+        if st.session_state.mp_subpage == "groups":
+            render_learning_groups_section()
+        elif st.session_state.mp_subpage == "duels":
+            render_duels_section()
+        elif st.session_state.mp_subpage == "challenges":
+            render_challenges_section()
+
+
+def render_learning_groups_section():
+    """Rendert den Lerngruppen-Bereich.
+
+    HINWEIS für Backend-Migration:
+    - Gruppen-Mitgliedschaft über Supabase RLS (Row Level Security) absichern
+    - Join-Codes sollten serverseitig generiert und validiert werden
+    - Gruppen-Chat würde Supabase Realtime benötigen
+    """
+    st.subheader("👥 Lerngruppen")
+
+    tab1, tab2, tab3 = st.tabs(["Meine Gruppen", "Gruppe erstellen", "Gruppe beitreten"])
+
+    with tab1:
+        groups = db_get_user_groups(st.session_state.user_id)
+
+        if not groups:
+            st.info("Du bist noch in keiner Lerngruppe. Erstelle eine oder tritt einer bei!")
+        else:
+            for group in groups:
+                with st.expander(f"📚 {group['name']} ({group['member_count']} Mitglieder)", expanded=False):
+                    st.write(f"**Beschreibung:** {group['description']}")
+                    st.write(f"**Wöchentliches XP-Ziel:** {group['weekly_xp_goal']:,} XP")
+                    st.write(f"**Deine Rolle:** {group['role'].capitalize()}")
+                    st.write(f"**Beitrittscode:** `{group['join_code']}`")
+
+                    # Gruppen-Leaderboard
+                    st.markdown("**🏆 Wochenrangliste:**")
+                    members = db_get_group_members(group["id"])
+                    leaderboard = sorted(members, key=lambda m: m.get("weekly_xp", 0), reverse=True)
+
+                    for i, member in enumerate(leaderboard[:5], 1):
+                        medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"{i}."
+                        st.write(f"{medal} {member['username']}: {member.get('weekly_xp', 0):,} XP")
+
+    with tab2:
+        st.markdown("### Neue Lerngruppe erstellen")
+
+        group_name = st.text_input("Gruppenname", placeholder="z.B. Mathe-Lerngruppe WS24")
+        group_desc = st.text_area("Beschreibung", placeholder="Wofür ist diese Gruppe?")
+        weekly_goal = st.number_input("Wöchentliches XP-Ziel", min_value=100, max_value=10000, value=1000, step=100)
+        is_public = st.checkbox("Öffentliche Gruppe (jeder kann beitreten)")
+
+        if st.button("✅ Gruppe erstellen"):
+            if group_name:
+                result = db_create_learning_group(
+                    name=group_name,
+                    description=group_desc,
+                    creator_id=st.session_state.user_id,
+                    creator_username=st.session_state.multiplayer_username
+                )
+                if result:
+                    st.success(f"Gruppe '{group_name}' erstellt! Beitrittscode: `{result['join_code']}`")
+                    st.balloons()
+            else:
+                st.error("Bitte Gruppennamen eingeben.")
+
+    with tab3:
+        st.markdown("### Gruppe beitreten")
+
+        join_code = st.text_input("Beitrittscode eingeben", placeholder="z.B. ABC123")
+
+        if st.button("🔗 Beitreten"):
+            if join_code:
+                success = db_join_group_by_code(
+                    join_code.upper().strip(),
+                    st.session_state.user_id,
+                    st.session_state.multiplayer_username
+                )
+                if success:
+                    st.success("Erfolgreich beigetreten!")
+                    st.rerun()
+                else:
+                    st.error("Ungültiger Code oder bereits Mitglied.")
+            else:
+                st.error("Bitte einen Beitrittscode eingeben.")
+
+
+def render_duels_section():
+    """Rendert den Duell-Bereich.
+
+    HINWEIS für Backend-Migration:
+    - Duell-Logik MUSS serverseitig laufen, um Cheating zu verhindern
+    - Echtzeit-Synchronisation über WebSocket/Supabase Realtime
+    - Antworten-Validierung auf dem Server
+    - Zeitlimits serverseitig enforced
+    """
+    st.subheader("⚔️ Quiz-Duelle")
+
+    tab1, tab2, tab3 = st.tabs(["Aktive Duelle", "Neues Duell", "Duell-Historie"])
+
+    with tab1:
+        active_duels = db_get_active_duels(st.session_state.user_id)
+
+        if not active_duels:
+            st.info("Keine aktiven Duelle. Starte ein neues Duell!")
+        else:
+            for duel in active_duels:
+                is_challenger = duel["challenger_id"] == st.session_state.user_id
+                opponent_name = "Gegner"  # In Produktion: echten Namen laden
+
+                status_emoji = "⏳" if duel["status"] == "pending" else "⚔️"
+                your_score = duel["challenger_score"] if is_challenger else duel["opponent_score"]
+                opponent_score = duel["opponent_score"] if is_challenger else duel["challenger_score"]
+
+                with st.expander(f"{status_emoji} Duell #{duel['id']} - {your_score}:{opponent_score}"):
+                    st.write(f"**Status:** {duel['status'].capitalize()}")
+                    st.write(f"**Frage:** {duel['current_question']}/{DUEL_SETTINGS['questions_per_round']}")
+
+                    if duel["status"] == "active":
+                        if st.button("▶️ Weiterspielen", key=f"continue_duel_{duel['id']}"):
+                            st.session_state.active_duel = duel
+                            st.session_state.duel_answers = []
+                            st.rerun()
+
+    with tab2:
+        st.markdown("### Neues Quiz-Duell starten")
+
+        st.markdown("""
+        **Spielregeln:**
+        - {} Fragen pro Runde
+        - {} Sekunden pro Frage
+        - {} XP für einen Sieg
+        - {} XP pro richtige Antwort
+        - {} Bonus-XP für perfekte Runde!
+        """.format(
+            DUEL_SETTINGS["questions_per_round"],
+            DUEL_SETTINGS["time_per_question"],
+            DUEL_SETTINGS["xp_per_win"],
+            DUEL_SETTINGS["xp_per_correct"],
+            DUEL_SETTINGS["xp_bonus_perfect"]
+        ))
+
+        # Deck auswählen
+        decks = db_get_decks(st.session_state.user_id)
+        if not decks:
+            st.warning("Erstelle zuerst ein Deck mit Karten.")
+            return
+
+        deck_options = {d.name: d.id for d in decks}
+        selected_deck_name = st.selectbox("Deck für das Duell wählen", list(deck_options.keys()))
+        deck_id = deck_options[selected_deck_name]
+
+        # Karten prüfen
+        cards = db_get_cards(deck_id)
+        if len(cards) < DUEL_SETTINGS["questions_per_round"]:
+            st.warning(f"Mindestens {DUEL_SETTINGS['questions_per_round']} Karten benötigt.")
+            return
+
+        st.markdown("---")
+        st.markdown("**Spielmodus:**")
+
+        mode = st.radio("Wähle den Spielmodus", [
+            "🤖 Solo-Training (gegen KI-Simulation)",
+            "👥 Herausforderung senden (Demo)"
+        ])
+
+        if mode.startswith("🤖"):
+            if st.button("⚔️ Solo-Duell starten"):
+                # Solo-Duell simulieren
+                duel_data = db_create_duel(
+                    challenger_id=st.session_state.user_id,
+                    opponent_id=st.session_state.user_id,  # Selbst-Duell für Demo
+                    deck_id=deck_id
+                )
+                if duel_data:
+                    st.session_state.active_duel = duel_data
+                    st.session_state.duel_answers = []
+                    st.session_state.duel_start_time = dt.datetime.now()
+                    st.success("Duell gestartet!")
+                    st.rerun()
+        else:
+            st.info("""
+            **HINWEIS für Backend:**
+            In einer echten Multiplayer-Umgebung würde hier:
+            1. Eine Einladung an den Gegner gesendet
+            2. Push-Notification beim Gegner erscheinen
+            3. Echtzeit-Synchronisation während des Spiels erfolgen
+
+            Benötigt: Supabase Auth + Realtime + Push-Service
+            """)
+
+    with tab3:
+        st.markdown("### 📊 Duell-Statistiken")
+
+        profile = st.session_state.user_profile
+        if profile:
+            duels_won = profile.get("duels_won", 0) if isinstance(profile, dict) else 0
+            duels_played = profile.get("duels_played", 0) if isinstance(profile, dict) else 0
+
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Gespielte Duelle", duels_played)
+            with col2:
+                st.metric("Gewonnene Duelle", duels_won)
+            with col3:
+                win_rate = (duels_won / duels_played * 100) if duels_played > 0 else 0
+                st.metric("Siegquote", f"{win_rate:.1f}%")
+
+    # Aktives Duell anzeigen
+    if st.session_state.active_duel:
+        render_active_duel()
+
+
+def render_active_duel():
+    """Rendert ein aktives Quiz-Duell."""
+    st.markdown("---")
+    st.markdown("### ⚔️ AKTIVES DUELL")
+
+    duel = st.session_state.active_duel
+    deck_id = duel.get("deck_id")
+
+    if not deck_id:
+        st.error("Kein Deck für dieses Duell gefunden.")
+        st.session_state.active_duel = None
+        return
+
+    cards = db_get_cards(deck_id)
+    if len(cards) < DUEL_SETTINGS["questions_per_round"]:
+        st.error("Nicht genügend Karten im Deck.")
+        st.session_state.active_duel = None
+        return
+
+    # Zufällige Karten für Duell (konsistent basierend auf Duell-ID)
+    import random
+    random.seed(duel["id"])
+    duel_cards = random.sample(cards, DUEL_SETTINGS["questions_per_round"])
+
+    current_q = duel.get("current_question", 0)
+
+    if current_q >= len(duel_cards):
+        # Duell beendet
+        your_score = duel.get("challenger_score", 0)
+        total = len(duel_cards)
+
+        st.success(f"🎉 Duell beendet! Dein Ergebnis: {your_score}/{total}")
+
+        # XP berechnen und vergeben
+        xp_earned = your_score * DUEL_SETTINGS["xp_per_correct"]
+        if your_score == total:
+            xp_earned += DUEL_SETTINGS["xp_bonus_perfect"]
+            st.balloons()
+            st.success(f"🌟 PERFEKT! Bonus: +{DUEL_SETTINGS['xp_bonus_perfect']} XP")
+
+        xp_earned += DUEL_SETTINGS["xp_per_win"]  # Win-Bonus (gegen sich selbst)
+
+        # XP gutschreiben
+        stats = st.session_state.user_stats
+        new_xp = stats.get("total_xp", 0) + xp_earned
+        update_user_stats(st.session_state.user_id, {"total_xp": new_xp})
+        st.session_state.user_stats["total_xp"] = new_xp
+
+        st.info(f"💰 Verdiente XP: +{xp_earned}")
+
+        # Profil aktualisieren
+        if st.session_state.user_profile:
+            profile = st.session_state.user_profile
+            if isinstance(profile, dict):
+                profile["duels_played"] = profile.get("duels_played", 0) + 1
+                profile["duels_won"] = profile.get("duels_won", 0) + 1
+
+        if st.button("🔙 Zurück"):
+            st.session_state.active_duel = None
+            st.rerun()
+
+        return
+
+    # Aktuelle Frage
+    card = duel_cards[current_q]
+
+    # Fortschritt
+    progress = current_q / len(duel_cards)
+    st.progress(progress)
+    st.caption(f"Frage {current_q + 1} von {len(duel_cards)}")
+
+    # Score
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric("Dein Score", duel.get("challenger_score", 0))
+    with col2:
+        st.metric("Zeit pro Frage", f"{DUEL_SETTINGS['time_per_question']}s")
+
+    # Frage anzeigen
+    st.markdown(f"""
+    <div class="question-card" style="padding:20px; border:2px solid #ff6b6b;">
+        <h3>❓ Frage:</h3>
+        <p style="font-size:1.2rem;">{card.front}</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # Antwort eingeben
+    user_answer = st.text_input("Deine Antwort:", key=f"duel_answer_{current_q}")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        if st.button("✅ Antwort prüfen", key=f"check_duel_{current_q}"):
+            # Einfache Antwortprüfung (in Produktion: KI-basiert oder fuzzy matching)
+            correct_answer = card.back.lower().strip()
+            user_lower = user_answer.lower().strip()
+
+            is_correct = (
+                user_lower == correct_answer or
+                user_lower in correct_answer or
+                correct_answer in user_lower
+            )
+
+            if is_correct:
+                st.success("✅ Richtig!")
+                duel["challenger_score"] = duel.get("challenger_score", 0) + 1
+                check_and_award_achievement(st.session_state.user_id, "duel_perfect")
+            else:
+                st.error(f"❌ Falsch! Richtige Antwort: {card.back}")
+
+            duel["current_question"] = current_q + 1
+            st.session_state.active_duel = duel
+
+            # Kurze Pause, dann weiter
+            time.sleep(1)
+            st.rerun()
+
+    with col2:
+        if st.button("⏭️ Überspringen"):
+            st.warning(f"Übersprungen. Antwort war: {card.back}")
+            duel["current_question"] = current_q + 1
+            st.session_state.active_duel = duel
+            time.sleep(1)
+            st.rerun()
+
+    # Abbrechen-Option
+    if st.button("❌ Duell abbrechen"):
+        st.session_state.active_duel = None
+        st.rerun()
+
+
+def render_challenges_section():
+    """Rendert den Challenges-Bereich.
+
+    HINWEIS für Backend-Migration:
+    - Challenges sollten serverseitig validiert werden
+    - Tägliche Challenges via Cron-Job generieren
+    - Fortschritt in Echtzeit tracken
+    """
+    st.subheader("🏆 Challenges & Wettbewerbe")
+
+    tab1, tab2 = st.tabs(["Aktive Challenges", "Challenge erstellen"])
+
+    with tab1:
+        st.markdown("### 📅 Tägliche Challenges")
+
+        # Standard-Challenges anzeigen
+        for ch_type, ch_data in CHALLENGE_TYPES.items():
+            with st.expander(f"{ch_data['icon']} {ch_data['name']} - {ch_data['xp']} XP"):
+                desc = ch_data["desc"].format(target=10)  # Default target
+                st.write(desc)
+
+                # Simulations-Fortschritt
+                if ch_type == "daily_cards":
+                    cards_today = st.session_state.user_stats.get("cards_learned_today", 0)
+                    progress = min(cards_today / 10, 1.0)
+                    st.progress(progress)
+                    st.caption(f"{cards_today}/10 Karten heute gelernt")
+
+                    if cards_today >= 10:
+                        st.success("✅ Challenge abgeschlossen!")
+                        st.balloons()
+
+                elif ch_type == "weekly_streak":
+                    current_streak = st.session_state.user_stats.get("current_streak", 0)
+                    progress = min(current_streak / 7, 1.0)
+                    st.progress(progress)
+                    st.caption(f"{current_streak}/7 Tage Streak")
+
+                elif ch_type == "perfect_round":
+                    st.info("Beantworte 10 Karten in Folge richtig!")
+                    if st.button(f"▶️ Starten", key=f"start_{ch_type}"):
+                        st.info("Gehe zu 'Karteikarten lernen' um diese Challenge zu versuchen.")
+
+        st.markdown("---")
+        st.markdown("### 👥 Gruppen-Challenges")
+
+        groups = db_get_user_groups(st.session_state.user_id)
+        if groups:
+            for group in groups:
+                st.write(f"**{group['name']}:** Wöchentliches Ziel - {group['weekly_xp_goal']:,} XP")
+                # Gruppen-Fortschritt würde hier angezeigt
+                st.progress(0.3)  # Demo-Wert
+                st.caption("Gruppen-Fortschritt wird in Echtzeit aktualisiert (Backend erforderlich)")
+        else:
+            st.info("Tritt einer Lerngruppe bei, um an Gruppen-Challenges teilzunehmen!")
+
+    with tab2:
+        st.markdown("### Eigene Challenge erstellen")
+
+        st.info("""
+        **HINWEIS für Backend:**
+        Benutzerdefinierte Challenges benötigen:
+        - Serverseitige Validierung der Regeln
+        - Zeitgesteuerte Start/End-Logik
+        - Benachrichtigungssystem für Teilnehmer
+        """)
+
+        challenge_name = st.text_input("Challenge-Name", placeholder="z.B. 100-Karten-Marathon")
+        target_value = st.number_input("Zielwert", min_value=1, max_value=1000, value=50)
+
+        challenge_type = st.selectbox("Challenge-Typ", [
+            "Karten lernen",
+            "Streak halten",
+            "Perfekte Runden",
+            "Duelle gewinnen"
+        ])
+
+        duration = st.selectbox("Dauer", ["1 Tag", "3 Tage", "1 Woche", "1 Monat"])
+        xp_reward = st.slider("XP-Belohnung", 50, 500, 100, 50)
+
+        if st.button("🎯 Challenge erstellen (Demo)"):
+            st.success(f"Challenge '{challenge_name}' erstellt! (Demo-Modus)")
+            st.info("In einer echten Backend-Umgebung würde diese Challenge für alle Gruppenmitglieder sichtbar sein.")
+
+
+# ============================================================
 # 10. Navigation
 # ============================================================
 
@@ -3143,6 +4303,7 @@ PAGES = {
     "🎧 Audio / 🎬 Video": page_audio_video_modes,
     "🤖 KI-Tutor": page_tutor_chat,
     "🎮 Gamification": page_gamification,
+    "👥 Multiplayer": page_multiplayer_hub,
     "🍅 Pomodoro": page_pomodoro,
     "📥 Import/Export": page_import_export,
     "⚙️ KI-Einstellungen": page_llm_settings,
