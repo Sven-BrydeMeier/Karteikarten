@@ -3001,14 +3001,9 @@ def page_pomodoro():
             st.session_state.pomodoro_duration = work_duration
             st.rerun()
 
-    # Quick-Links
+    # Tipp
     st.markdown("---")
-    st.subheader("🎯 Schnellzugriff")
-    col1, col2 = st.columns(2)
-    with col1:
-        st.page_link("", label="📚 Karteikarten lernen", disabled=True)
-    with col2:
-        st.page_link("", label="🤖 KI-Tutor fragen", disabled=True)
+    st.info("💡 **Tipp:** Nutze den Pomodoro-Timer während du Karteikarten lernst oder mit dem KI-Tutor arbeitest!")
 
 
 def page_cloze_cards():
