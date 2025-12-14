@@ -21,8 +21,8 @@ from dotenv import load_dotenv
 # ============================================================
 
 # App-Version
-APP_VERSION = "1.1.0"
-APP_LAST_UPDATE = "2025-12-13 20:40"
+APP_VERSION = "1.2.0"
+APP_LAST_UPDATE = "2025-12-14 10:30"
 
 load_dotenv()  # .env-Datei laden, falls vorhanden
 
@@ -1006,20 +1006,97 @@ def llm_generate_exam(subject: str, topic: str, duration_minutes: int, level: st
 # 7. STT / TTS / Dateiextraktion
 # ============================================================
 
-def stt_transcribe_audio(file_bytes: bytes) -> str:
+def stt_transcribe_audio(file_bytes: bytes, filename: str = "audio.mp3") -> str:
     """
-    Spracherkennung: Audio (Bytes) -> Text.
-    TODO: Hier einen echten STT-Dienst anbinden (z.B. Whisper).
+    Spracherkennung: Audio (Bytes) -> Text mit OpenAI Whisper.
     """
-    return "Transkription noch nicht implementiert."
+    try:
+        api_key = st.session_state.openai_api_key.strip()
+        if not api_key:
+            return "Fehler: Kein OpenAI-API-Key hinterlegt. Bitte unter KI-Einstellungen konfigurieren."
+
+        client = OpenAI(api_key=api_key)
+
+        # Erstelle ein file-like Objekt für die API
+        audio_file = BytesIO(file_bytes)
+        audio_file.name = filename
+
+        transcript = client.audio.transcriptions.create(
+            model="whisper-1",
+            file=audio_file,
+            language="de"
+        )
+        return transcript.text
+    except OpenAIRateLimitError:
+        return "Fehler: OpenAI Rate-Limit erreicht. Bitte später erneut versuchen."
+    except OpenAIAPIError as e:
+        return f"Fehler bei der Transkription: {e}"
+    except Exception as e:
+        return f"Unerwarteter Fehler bei der Transkription: {e}"
 
 
-def tts_generate_audio_from_text(text: str) -> bytes:
+def tts_generate_audio_from_text(text: str, voice: str = "alloy") -> bytes:
     """
-    Text-to-Speech: Text -> Audio-Bytes (z.B. mp3 oder wav).
-    TODO: Hier einen echten TTS-Dienst anbinden.
+    Text-to-Speech: Text -> Audio-Bytes (mp3) mit OpenAI TTS.
+    Verfügbare Stimmen: alloy, echo, fable, onyx, nova, shimmer
     """
-    return b""
+    try:
+        api_key = st.session_state.openai_api_key.strip()
+        if not api_key:
+            st.error("Kein OpenAI-API-Key hinterlegt. Bitte unter KI-Einstellungen konfigurieren.")
+            return b""
+
+        client = OpenAI(api_key=api_key)
+
+        # OpenAI TTS hat ein Limit von 4096 Zeichen pro Anfrage
+        # Bei längeren Texten in Chunks aufteilen
+        max_chars = 4096
+        audio_chunks = []
+
+        # Text in Sätze aufteilen für natürliche Pausen
+        sentences = re.split(r'(?<=[.!?])\s+', text)
+        current_chunk = ""
+
+        for sentence in sentences:
+            if len(current_chunk) + len(sentence) < max_chars:
+                current_chunk += sentence + " "
+            else:
+                if current_chunk.strip():
+                    audio_chunks.append(current_chunk.strip())
+                current_chunk = sentence + " "
+
+        if current_chunk.strip():
+            audio_chunks.append(current_chunk.strip())
+
+        # Generiere Audio für jeden Chunk
+        all_audio = b""
+        for i, chunk in enumerate(audio_chunks):
+            if not chunk:
+                continue
+
+            response = client.audio.speech.create(
+                model="tts-1",
+                voice=voice,
+                input=chunk,
+                response_format="mp3"
+            )
+            all_audio += response.content
+
+            # Fortschrittsanzeige
+            if len(audio_chunks) > 1:
+                st.progress((i + 1) / len(audio_chunks), text=f"Generiere Audio: Teil {i+1}/{len(audio_chunks)}")
+
+        return all_audio
+
+    except OpenAIRateLimitError:
+        st.error("OpenAI Rate-Limit erreicht. Bitte später erneut versuchen.")
+        return b""
+    except OpenAIAPIError as e:
+        st.error(f"Fehler bei der Audio-Generierung: {e}")
+        return b""
+    except Exception as e:
+        st.error(f"Unerwarteter Fehler bei der Audio-Generierung: {e}")
+        return b""
 
 
 def extract_text_from_pdf(uploaded_file) -> str:
@@ -1490,8 +1567,8 @@ def page_exam_simulation():
     else:
         uploaded_audio = st.file_uploader("Audioantwort hochladen (z.B. mp3/wav)", type=["mp3", "wav"], key="exam_audio")
         if uploaded_audio is not None and st.button("Audio transkribieren"):
-            with st.spinner("Audio wird transkribiert…"):
-                answer_text = stt_transcribe_audio(uploaded_audio.read())
+            with st.spinner("Audio wird transkribiert mit OpenAI Whisper…"):
+                answer_text = stt_transcribe_audio(uploaded_audio.read(), uploaded_audio.name)
             st.text_area("Transkribierte Antwort", answer_text, height=250, key="exam_answer_from_audio")
 
     if st.button("Antwort auswerten"):
@@ -1502,38 +1579,206 @@ def page_exam_simulation():
         st.info("Prüfungssimulation wurde abgebrochen.")
 
 
+def generate_audio_script(cards: List[Card], subject: str, topic: str) -> str:
+    """
+    Generiert ein natuerliches Hoerbuch-Skript aus Karteikarten mittels KI.
+    """
+    cards_text = "\n\n".join([
+        f"Frage {i+1}: {c.question}\nAntwort: {c.answer}\nErklaerung: {c.explanation}"
+        for i, c in enumerate(cards)
+    ])
+
+    system_prompt = """
+Du bist ein erfahrener Dozent, der Lerninhalte als Hoerbuch aufbereitet.
+Erstelle aus den gegebenen Karteikarten ein zusammenhaengendes, gut strukturiertes
+Hoerbuch-Skript. Der Text soll:
+- Natuerlich und fluessig klingen (zum Vorlesen geeignet)
+- Die wichtigsten Konzepte erklaeren
+- Zusammenhaenge zwischen den Themen herstellen
+- Mit einer kurzen Einfuehrung beginnen und einem Fazit enden
+- Keine Aufzaehlungszeichen oder Formatierungen enthalten (nur Fliesstext)
+"""
+
+    user_prompt = f"""
+FACH: {subject}
+THEMA: {topic}
+
+KARTEIKARTEN:
+{cards_text}
+
+Erstelle ein Hoerbuch-Skript (ca. 500-1000 Woerter), das diese Inhalte didaktisch aufbereitet vermittelt.
+"""
+
+    try:
+        return call_llm(system_prompt, user_prompt)
+    except LLMError as e:
+        st.error(f"Fehler bei der Skript-Generierung: {e}")
+        return ""
+
+
 def page_audio_video_modes():
     st.title("🎧 Audio- & 🎬 Video-Lernen")
 
     st.write("""
-    Hier können Lerninhalte als Hörbuch (Audio) oder als Video mit erklärenden Grafiken bereitgestellt werden.
-    Aktuell ist dies ein Interface-Platzhalter. Die konkrete TTS-/Video-Implementierung kann später ergänzt werden.
+    Hier kannst du Lerninhalte als **Hoerbuch** (Audio) anhoeren oder als **Lernkarten-Slideshow** durchgehen.
+    Die KI erstellt ein natuerliches Hoerbuch-Skript aus deinen Karteikarten.
     """)
+
+    # Pruefe OpenAI-Key fuer Audio
+    if not st.session_state.openai_api_key.strip():
+        st.warning("⚠️ Fuer Audio-Funktionen wird ein OpenAI-API-Key benoetigt. Bitte unter 'KI-Einstellungen' hinterlegen.")
 
     decks = db_get_decks(st.session_state.user_id)
     if not decks:
-        st.info("Noch keine Decks vorhanden.")
+        st.info("Noch keine Decks vorhanden. Lade zuerst Dokumente hoch und lass Karten erzeugen.")
         return
 
     deck_names = {f"{d.subject} – {d.topic} (#{d.id})": d.id for d in decks}
-    chosen = st.selectbox("Deck / Thema auswählen", list(deck_names.keys()))
+    chosen = st.selectbox("Deck / Thema auswaehlen", list(deck_names.keys()))
     chosen_deck_id = deck_names[chosen]
 
-    mode = st.radio("Modus wählen", ["Audio (Kapitelweise Erklärung)", "Video (mit Grafiken)"], horizontal=True)
+    # Finde das gewaehlte Deck
+    chosen_deck = next((d for d in decks if d.id == chosen_deck_id), None)
 
-    if st.button("Inhalt generieren"):
-        cards_for_deck = db_get_cards_by_deck(chosen_deck_id, st.session_state.user_id)
-        full_text = "\n\n".join([f"Frage: {c.question}\nAntwort: {c.answer}\n{c.explanation}" for c in cards_for_deck])
+    mode = st.radio("Modus waehlen", ["🎧 Audio (Hoerbuch)", "🎬 Lernkarten-Slideshow"], horizontal=True)
 
-        with st.spinner("Generiere Audio/Video – Platzhalter…"):
-            if mode.startswith("Audio"):
-                audio_bytes = tts_generate_audio_from_text(full_text)
-                if audio_bytes:
-                    st.audio(audio_bytes, format="audio/wav")
-                else:
-                    st.warning("Audio-TTS noch nicht implementiert.")
+    if mode.startswith("🎧"):
+        # Audio-Modus
+        st.subheader("Audio-Einstellungen")
+
+        col1, col2 = st.columns(2)
+        with col1:
+            voice = st.selectbox(
+                "Stimme auswaehlen",
+                ["alloy", "echo", "fable", "onyx", "nova", "shimmer"],
+                help="Verschiedene OpenAI TTS-Stimmen mit unterschiedlichen Charakteristiken"
+            )
+        with col2:
+            script_mode = st.radio(
+                "Skript-Modus",
+                ["KI-Hoerbuch (empfohlen)", "Rohdaten (Frage/Antwort)"],
+                help="KI-Hoerbuch: Natuerlicher Fliesstext. Rohdaten: Direkte Frage-Antwort-Paare."
+            )
+
+        if st.button("🎧 Audio generieren"):
+            cards_for_deck = db_get_cards_by_deck(chosen_deck_id, st.session_state.user_id)
+
+            if not cards_for_deck:
+                st.warning("Keine Karten in diesem Deck vorhanden.")
+                return
+
+            # Generiere Skript
+            if script_mode.startswith("KI"):
+                with st.spinner("KI erstellt Hoerbuch-Skript..."):
+                    script = generate_audio_script(
+                        cards_for_deck,
+                        chosen_deck.subject if chosen_deck else "Allgemein",
+                        chosen_deck.topic if chosen_deck else "Allgemein"
+                    )
             else:
-                st.warning("Video-Rendering ist als Erweiterung vorgesehen und hier noch nicht implementiert.")
+                script = "\n\n".join([
+                    f"Frage: {c.question}. Antwort: {c.answer}. {c.explanation}"
+                    for c in cards_for_deck
+                ])
+
+            if not script:
+                st.error("Konnte kein Skript generieren.")
+                return
+
+            # Zeige Skript
+            with st.expander("📝 Generiertes Skript anzeigen"):
+                st.text_area("Skript", script, height=300)
+
+            # Generiere Audio
+            with st.spinner("Generiere Audio mit OpenAI TTS..."):
+                audio_bytes = tts_generate_audio_from_text(script, voice=voice)
+
+            if audio_bytes:
+                st.success("✅ Audio erfolgreich generiert!")
+
+                # Audio-Player
+                st.audio(audio_bytes, format="audio/mp3")
+
+                # Download-Button
+                st.download_button(
+                    label="⬇️ Audio herunterladen (MP3)",
+                    data=audio_bytes,
+                    file_name=f"hoerbuch_{chosen_deck.topic if chosen_deck else 'lerninhalt'}.mp3",
+                    mime="audio/mpeg"
+                )
+            else:
+                st.error("Audio-Generierung fehlgeschlagen. Bitte OpenAI-API-Key pruefen.")
+
+    else:
+        # Slideshow-Modus
+        st.subheader("🎬 Lernkarten-Slideshow")
+
+        cards_for_deck = db_get_cards_by_deck(chosen_deck_id, st.session_state.user_id)
+
+        if not cards_for_deck:
+            st.warning("Keine Karten in diesem Deck vorhanden.")
+            return
+
+        # Slideshow-Navigation
+        if "slideshow_index" not in st.session_state:
+            st.session_state.slideshow_index = 0
+
+        total_cards = len(cards_for_deck)
+        current_idx = st.session_state.slideshow_index
+
+        # Navigation
+        col1, col2, col3 = st.columns([1, 2, 1])
+        with col1:
+            if st.button("⬅️ Zurueck", disabled=current_idx == 0):
+                st.session_state.slideshow_index -= 1
+                st.rerun()
+        with col2:
+            st.markdown(f"<h3 style='text-align: center;'>Karte {current_idx + 1} / {total_cards}</h3>", unsafe_allow_html=True)
+        with col3:
+            if st.button("Weiter ➡️", disabled=current_idx >= total_cards - 1):
+                st.session_state.slideshow_index += 1
+                st.rerun()
+
+        # Aktuelle Karte anzeigen
+        if current_idx < total_cards:
+            card = cards_for_deck[current_idx]
+            bg_color = SUBJECT_COLORS.get(card.subject, "#f5f5f5")
+
+            # Slide-Darstellung
+            st.markdown(f"""
+            <div style="
+                background: linear-gradient(135deg, {bg_color} 0%, #ffffff 100%);
+                padding: 2rem;
+                border-radius: 1rem;
+                box-shadow: 0 10px 40px rgba(0,0,0,0.15);
+                margin: 1rem 0;
+                min-height: 300px;
+            ">
+                <h2 style="color: #1e3a5f; margin-bottom: 1rem;">❓ Frage</h2>
+                <p style="font-size: 1.2rem; color: #333; line-height: 1.6;">{card.question}</p>
+            </div>
+            """, unsafe_allow_html=True)
+
+            # Antwort aufdecken
+            if st.button("💡 Antwort anzeigen", key=f"show_answer_{current_idx}"):
+                st.markdown(f"""
+                <div style="
+                    background: linear-gradient(135deg, #e8f5e9 0%, #ffffff 100%);
+                    padding: 2rem;
+                    border-radius: 1rem;
+                    box-shadow: 0 10px 40px rgba(0,0,0,0.15);
+                    margin: 1rem 0;
+                ">
+                    <h2 style="color: #2e7d32; margin-bottom: 1rem;">✅ Antwort</h2>
+                    <p style="font-size: 1.1rem; color: #333; line-height: 1.6;">{card.answer}</p>
+                    {"<hr style='margin: 1rem 0;'><p style='color: #666;'><strong>Erklaerung:</strong> " + card.explanation + "</p>" if card.explanation else ""}
+                </div>
+                """, unsafe_allow_html=True)
+
+        # Zurueck zum Anfang
+        if st.button("🔄 Slideshow von vorne starten"):
+            st.session_state.slideshow_index = 0
+            st.rerun()
 
 
 def page_llm_settings():
