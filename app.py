@@ -1808,9 +1808,14 @@ class LLMError(Exception):
     pass
 
 
-def call_llm(system_prompt: str, user_prompt: str) -> str:
+def call_llm(system_prompt: str, user_prompt: str, max_tokens: int = 4096) -> str:
     """
     Zentrale Stelle für alle LLM-Aufrufe mit umfassendem Error-Handling.
+
+    Args:
+        system_prompt: System-Anweisung für die KI
+        user_prompt: Benutzer-Anfrage
+        max_tokens: Maximale Anzahl Tokens in der Antwort (Standard: 4096)
     """
     try:
         client, provider = get_llm_client()
@@ -1826,13 +1831,14 @@ def call_llm(system_prompt: str, user_prompt: str) -> str:
                     {"role": "user", "content": user_prompt},
                 ],
                 temperature=0.3,
+                max_tokens=max_tokens,
             )
             return resp.choices[0].message.content
 
         else:  # anthropic
             resp = client.messages.create(
                 model="claude-3-5-sonnet-20240620",
-                max_tokens=4096,
+                max_tokens=max_tokens,
                 temperature=0.3,
                 system=system_prompt,
                 messages=[
@@ -1893,6 +1899,8 @@ FACH: Rechtswissenschaften
 SCHWERPUNKT: {topic}
 NIVEAU: {difficulty}
 
+{format_instruction}
+
 AUFGABE:
 Erzeuge aus dem folgenden juristischen Fachtext hochwertige Karteikarten für Jurastudierende.
 
@@ -1902,7 +1910,7 @@ TEXT:
 Didaktische Anforderungen:
 - Definitionen, Schemata, Mini-Fälle, Abgrenzungen und Klausurtaktik mischen.
 - Schwierigkeitsgrad an {difficulty} anpassen.
-- Multiple Choice nur mit sinnvollen Distraktoren (4 Optionen, 1 richtig), sonst Freitextkarten.
+- Bei Multiple-Choice: Plausible Distraktoren, die typische Fehler abbilden.
 
 Rückgabe:
 Nur das JSON-Array der Karten gemäß System-Anweisung.
@@ -1913,6 +1921,8 @@ FACH: Medizin
 SCHWERPUNKT: {topic}
 NIVEAU: {difficulty}
 
+{format_instruction}
+
 AUFGABE:
 Erzeuge aus dem folgenden medizinischen Fachtext hochwertige Karteikarten für Medizinstudierende.
 
@@ -1922,7 +1932,7 @@ TEXT:
 Didaktische Anforderungen:
 - Leitsymptome, Pathophysiologie, Diagnostik, TherapiePRINZIPIEN und Komplikationen.
 - Keine Dosierungen oder individuellen Therapiepläne.
-- Multiple Choice vor allem bei Diagnosen/DD (4 Optionen, 1 richtig).
+- Bei Multiple-Choice: Klinisch relevante Distraktoren (DD, ähnliche Erkrankungen).
 
 Rückgabe:
 Nur das JSON-Array der Karten gemäß System-Anweisung.
@@ -1932,6 +1942,8 @@ GENERIC_FLASHCARD_USER_PROMPT = """
 FACH: {subject}
 SCHWERPUNKT / THEMA: {topic}
 NIVEAU: {difficulty}
+
+{format_instruction}
 
 AUFGABE:
 Erzeuge aus dem folgenden Fachtext hochwertige Karteikarten für Studierende.
@@ -1943,6 +1955,7 @@ Didaktische Anforderungen:
 - Zentrale Begriffe, Konzepte, Algorithmen, Formeln, Anwendungsfälle.
 - Mischung aus Definitions-, Konzept-, Anwendungs- und Vergleichskarten.
 - Schwierigkeitsgrad an {difficulty} anpassen.
+- Bei Multiple-Choice: Plausible Distraktoren aus dem Fachgebiet.
 
 Rückgabe:
 Nur das JSON-Array der Karten gemäß System-Anweisung.
@@ -2160,18 +2173,64 @@ def extract_json_from_response(raw: str) -> Any:
     raise ValueError(f"Kein gueltiges JSON in der Antwort gefunden. Antwort beginnt mit: {text[:100]}...")
 
 
-def llm_generate_flashcards(text: str, subject: str, topic: str, difficulty: str) -> List[Dict[str, Any]]:
+def llm_generate_flashcards(
+    text: str,
+    subject: str,
+    topic: str,
+    difficulty: str,
+    num_cards: int = 20,
+    card_format: str = "Gemischt (empfohlen)"
+) -> List[Dict[str, Any]]:
+    """Generiert Karteikarten mit der KI.
+
+    Args:
+        text: Der Quelltext aus dem Karten generiert werden
+        subject: Fachgebiet (Rechtswissenschaften, Medizin, etc.)
+        topic: Thema/Kapitel
+        difficulty: Schwierigkeitsgrad
+        num_cards: Zielanzahl der zu generierenden Karten
+        card_format: "Gemischt (empfohlen)", "Nur Multiple-Choice", oder "Nur Freitext"
+    """
+    # Format-Anweisung basierend auf Auswahl
+    if card_format == "Nur Multiple-Choice":
+        format_instruction = f"""
+WICHTIG - KARTENFORMAT:
+- Erzeuge GENAU {num_cards} Karteikarten.
+- ALLE Karten MÜSSEN Multiple-Choice sein.
+- Jede Karte hat genau 4 Antwortoptionen ("choices": ["A", "B", "C", "D"]).
+- Genau eine Option ist korrekt ("correct_choice_index": 0-3).
+- Distraktoren müssen plausibel aber eindeutig falsch sein.
+"""
+    elif card_format == "Nur Freitext":
+        format_instruction = f"""
+WICHTIG - KARTENFORMAT:
+- Erzeuge GENAU {num_cards} Karteikarten.
+- ALLE Karten sind Freitext-Karten (KEINE Multiple-Choice).
+- Setze "choices": null und "correct_choice_index": null.
+- Formuliere Fragen, die ausführliche Antworten erfordern.
+"""
+    else:  # Gemischt
+        format_instruction = f"""
+WICHTIG - KARTENFORMAT:
+- Erzeuge GENAU {num_cards} Karteikarten.
+- Mische Multiple-Choice und Freitext-Karten (ca. 50/50).
+- Multiple-Choice: 4 Optionen, 1 richtig, plausible Distraktoren.
+- Freitext: "choices": null, "correct_choice_index": null.
+"""
+
     if subject == "Rechtswissenschaften":
         user_prompt = JURA_FLASHCARD_USER_PROMPT.format(
             topic=topic,
             difficulty=difficulty,
             text=text,
+            format_instruction=format_instruction,
         )
     elif subject == "Medizin":
         user_prompt = MED_FLASHCARD_USER_PROMPT.format(
             topic=topic,
             difficulty=difficulty,
             text=text,
+            format_instruction=format_instruction,
         )
     else:
         user_prompt = GENERIC_FLASHCARD_USER_PROMPT.format(
@@ -2179,10 +2238,11 @@ def llm_generate_flashcards(text: str, subject: str, topic: str, difficulty: str
             topic=topic,
             difficulty=difficulty,
             text=text,
+            format_instruction=format_instruction,
         )
 
     try:
-        raw = call_llm(FLASHCARD_SYSTEM_PROMPT, user_prompt)
+        raw = call_llm(FLASHCARD_SYSTEM_PROMPT, user_prompt, max_tokens=8192)
     except LLMError as e:
         st.error(f"KI-Fehler: {e}")
         return []
@@ -2668,6 +2728,25 @@ def page_upload_and_generate():
     with col2:
         difficulty = st.selectbox("Schwierigkeit", ["Einsteiger", "Fortgeschritten", "Examensniveau"])
 
+    # Neue Optionen für Kartenanzahl und Multiple-Choice
+    st.markdown("### ⚙️ Generierungsoptionen")
+    col3, col4 = st.columns(2)
+    with col3:
+        num_cards = st.slider(
+            "Anzahl Karteikarten",
+            min_value=5,
+            max_value=50,
+            value=20,
+            step=5,
+            help="Wie viele Karteikarten sollen generiert werden? Bei umfangreichem Material können mehr Karten erzeugt werden."
+        )
+    with col4:
+        card_format = st.selectbox(
+            "Kartenformat",
+            ["Gemischt (empfohlen)", "Nur Multiple-Choice", "Nur Freitext"],
+            help="Multiple-Choice: 4 Optionen mit einer richtigen Antwort. Freitext: Offene Fragen."
+        )
+
     uploaded_files = st.file_uploader(
         "Skripte, Bücher, PDFs, Bilder etc. hochladen",
         type=["pdf", "docx", "txt", "png", "jpg", "jpeg"],
@@ -2684,8 +2763,11 @@ def page_upload_and_generate():
             text = extract_text_from_uploaded_file(uf)
             combined_text += "\n\n" + text
 
-        with st.spinner("KI erstellt gerade Lernkarten…"):
-            card_specs = llm_generate_flashcards(combined_text, subject, topic, difficulty)
+        with st.spinner(f"KI erstellt gerade {num_cards} Lernkarten…"):
+            card_specs = llm_generate_flashcards(
+                combined_text, subject, topic, difficulty,
+                num_cards=num_cards, card_format=card_format
+            )
 
         if not card_specs:
             st.error("Es konnten keine Karten erzeugt werden.")
