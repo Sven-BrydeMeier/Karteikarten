@@ -25,8 +25,8 @@ from dotenv import load_dotenv
 # ============================================================
 
 # App-Version
-APP_VERSION = "2.1.0"
-APP_LAST_UPDATE = "2025-12-14 12:00"
+APP_VERSION = "2.1.1"
+APP_LAST_UPDATE = "2025-12-29"
 
 load_dotenv()  # .env-Datei laden, falls vorhanden
 
