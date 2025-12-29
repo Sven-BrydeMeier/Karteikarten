@@ -1847,29 +1847,58 @@ def call_llm(system_prompt: str, user_prompt: str, max_tokens: int = 4096) -> st
             )
             return resp.content[0].text
 
-    except OpenAIRateLimitError:
-        raise LLMError(
-            "OpenAI Rate-Limit erreicht. Moegliche Ursachen:\n"
-            "- Kein Guthaben auf dem OpenAI-Account\n"
-            "- Zu viele Anfragen in kurzer Zeit\n\n"
-            "Loesungen:\n"
-            "1. Guthaben pruefen: https://platform.openai.com/usage\n"
-            "2. Zahlungsmethode hinzufuegen\n"
-            "3. Alternativ zu Claude (Anthropic) wechseln"
-        )
+    except OpenAIRateLimitError as e:
+        error_msg = str(e).lower()
+        if "insufficient_quota" in error_msg or "quota" in error_msg:
+            raise LLMError(
+                "OpenAI Kontingent erschöpft.\n\n"
+                "Lösung: Guthaben prüfen unter https://platform.openai.com/usage"
+            )
+        else:
+            raise LLMError(
+                "OpenAI Rate-Limit erreicht (zu viele Anfragen pro Minute).\n\n"
+                "Lösung: Bitte warte 30-60 Sekunden und versuche es erneut."
+            )
     except OpenAIAPIError as e:
-        raise LLMError(f"OpenAI API-Fehler: {e}")
-    except AnthropicRateLimitError:
-        raise LLMError(
-            "Anthropic Rate-Limit erreicht. Moegliche Ursachen:\n"
-            "- Kein Guthaben auf dem Anthropic-Account\n"
-            "- Zu viele Anfragen in kurzer Zeit\n\n"
-            "Loesungen:\n"
-            "1. Guthaben pruefen: https://console.anthropic.com/\n"
-            "2. Alternativ zu OpenAI wechseln"
-        )
+        error_msg = str(e).lower()
+        if "context_length" in error_msg or "maximum context" in error_msg or "too long" in error_msg:
+            raise LLMError(
+                "Der Text ist zu lang für das KI-Modell.\n\n"
+                "Lösung: Bitte lade ein kleineres Dokument hoch oder teile es auf."
+            )
+        elif "invalid_api_key" in error_msg or "authentication" in error_msg:
+            raise LLMError(
+                "Ungültiger OpenAI API-Key.\n\n"
+                "Lösung: Prüfe den API-Key in den Einstellungen."
+            )
+        else:
+            raise LLMError(f"OpenAI API-Fehler: {e}")
+    except AnthropicRateLimitError as e:
+        error_msg = str(e).lower()
+        if "credit" in error_msg or "billing" in error_msg:
+            raise LLMError(
+                "Anthropic Kontingent erschöpft.\n\n"
+                "Lösung: Guthaben prüfen unter https://console.anthropic.com/"
+            )
+        else:
+            raise LLMError(
+                "Anthropic Rate-Limit erreicht (zu viele Anfragen pro Minute).\n\n"
+                "Lösung: Bitte warte 30-60 Sekunden und versuche es erneut."
+            )
     except AnthropicAPIError as e:
-        raise LLMError(f"Anthropic API-Fehler: {e}")
+        error_msg = str(e).lower()
+        if "too long" in error_msg or "token" in error_msg and "limit" in error_msg:
+            raise LLMError(
+                "Der Text ist zu lang für das KI-Modell.\n\n"
+                "Lösung: Bitte lade ein kleineres Dokument hoch oder teile es auf."
+            )
+        elif "invalid" in error_msg and "key" in error_msg:
+            raise LLMError(
+                "Ungültiger Anthropic API-Key.\n\n"
+                "Lösung: Prüfe den API-Key in den Einstellungen."
+            )
+        else:
+            raise LLMError(f"Anthropic API-Fehler: {e}")
     except Exception as e:
         raise LLMError(f"Unerwarteter Fehler bei der KI-Anfrage: {e}")
 
@@ -2762,6 +2791,19 @@ def page_upload_and_generate():
         for uf in uploaded_files:
             text = extract_text_from_uploaded_file(uf)
             combined_text += "\n\n" + text
+
+        # Textlänge prüfen und ggf. kürzen (max ~100k Zeichen für Kontextfenster)
+        MAX_TEXT_LENGTH = 100000
+        if len(combined_text) > MAX_TEXT_LENGTH:
+            st.warning(
+                f"⚠️ Der Text ist sehr lang ({len(combined_text):,} Zeichen). "
+                f"Er wird auf {MAX_TEXT_LENGTH:,} Zeichen gekürzt, um Fehler zu vermeiden. "
+                "Für bessere Ergebnisse teile große Dokumente auf."
+            )
+            combined_text = combined_text[:MAX_TEXT_LENGTH]
+
+        # Zeige Textstatistik
+        st.info(f"📊 Verarbeite {len(combined_text):,} Zeichen aus {len(uploaded_files)} Datei(en)")
 
         with st.spinner(f"KI erstellt gerade {num_cards} Lernkarten…"):
             card_specs = llm_generate_flashcards(
