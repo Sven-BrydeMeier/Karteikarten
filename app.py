@@ -25,7 +25,7 @@ from dotenv import load_dotenv
 # ============================================================
 
 # App-Version
-APP_VERSION = "2.1.2"
+APP_VERSION = "2.1.3"
 APP_LAST_UPDATE = "2025-12-29"
 
 load_dotenv()  # .env-Datei laden, falls vorhanden
@@ -2894,6 +2894,39 @@ def render_card_study_ui(card: Card):
     # Verwende den vor der Sitzung gewaehlten Antwortmodus
     mode = st.session_state.study_answer_mode
 
+    # Prüfe ob bereits ein Ergebnis für diese Karte vorliegt
+    result_key = f"card_result_{card.id}"
+    feedback_key = f"card_feedback_{card.id}"
+
+    # Wenn bereits beantwortet, zeige Ergebnis und Weiter-Button
+    if result_key in st.session_state and st.session_state[result_key] is not None:
+        result = st.session_state[result_key]
+        feedback = st.session_state.get(feedback_key, "")
+
+        if feedback:
+            if result == "correct":
+                st.success(feedback)
+            elif result == "skip":
+                st.warning(feedback)
+            else:
+                st.error(feedback)
+
+        # Zeige Musterlösung
+        with st.expander("📘 Musterlösung anzeigen"):
+            st.markdown(f"**Antwort:** {card.answer}")
+            if card.explanation:
+                st.markdown(f"**Erklärung:** {card.explanation}")
+
+        if st.button("➡️ Nächste Karte", key=f"next_{card.id}", type="primary"):
+            # Ergebnis löschen und zur nächsten Karte
+            del st.session_state[result_key]
+            if feedback_key in st.session_state:
+                del st.session_state[feedback_key]
+            st.session_state.current_card_index += 1
+            st.rerun()
+
+        return result, feedback
+
     result = None
     feedback = None
 
@@ -2921,26 +2954,37 @@ def render_card_study_ui(card: Card):
         with col1:
             clicked_check = st.button("Antwort bewerten", key=f"check_ft_{card.id}")
         with col2:
-            clicked_skip = st.button("Skip", key=f"skip_{card.id}")
+            clicked_skip = st.button("⏭️ Überspringen", key=f"skip_{card.id}")
         with col3:
-            show_solution = st.button("Loesung anzeigen", key=f"solution_{card.id}")
+            show_solution = st.button("💡 Lösung zeigen", key=f"solution_{card.id}")
 
         if clicked_skip:
             result = "skip"
-            feedback = "⏭ Frage wurde uebersprungen. Karte wandert in den Sondertopf."
+            feedback = "⏭ Frage wurde übersprungen. Karte wandert in den Sondertopf."
         elif clicked_check:
-            eval_result = llm_evaluate_free_text_answer(user_text, card)
-            if eval_result["grade"] == "correct":
-                result = "correct"
-                feedback = "✅ Deine Antwort wird als richtig gewertet."
-            elif eval_result["grade"] == "partial":
-                result = "wrong"
-                feedback = "⚠️ Teilweise richtig. " + eval_result.get("explanation", "")
+            if not user_text.strip():
+                st.warning("Bitte gib eine Antwort ein oder überspringe die Karte.")
             else:
-                result = "wrong"
-                feedback = "❌ Falsch. " + eval_result.get("explanation", "")
+                with st.spinner("KI bewertet deine Antwort..."):
+                    eval_result = llm_evaluate_free_text_answer(user_text, card)
+                if eval_result["grade"] == "correct":
+                    result = "correct"
+                    feedback = "✅ Deine Antwort wird als richtig gewertet."
+                elif eval_result["grade"] == "partial":
+                    result = "wrong"
+                    feedback = "⚠️ Teilweise richtig. " + eval_result.get("explanation", "")
+                else:
+                    result = "wrong"
+                    feedback = "❌ Falsch. " + eval_result.get("explanation", "")
         elif show_solution:
-            feedback = f"📘 Musterloesung:\n\n{card.answer}\n\n{card.explanation}"
+            st.info(f"📘 **Musterlösung:**\n\n{card.answer}\n\n{card.explanation if card.explanation else ''}")
+
+    # Speichere Ergebnis im Session State für Persistenz
+    if result is not None:
+        st.session_state[result_key] = result
+        st.session_state[feedback_key] = feedback
+        update_card_after_result(card, result)
+        st.rerun()  # Seite neu laden um Ergebnis anzuzeigen
 
     return result, feedback
 
@@ -2988,21 +3032,31 @@ def page_study_cards():
         return
 
     index = st.session_state.current_card_index
-    if index >= len(st.session_state.current_cards):
-        st.success("Diese Lernsitzung ist abgeschlossen! 🎉")
+    total_cards = len(st.session_state.current_cards)
+
+    if index >= total_cards:
+        st.success("🎉 Diese Lernsitzung ist abgeschlossen!")
+        st.balloons()
+
+        # Statistik anzeigen
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("Karten gelernt", total_cards)
+        with col2:
+            if st.button("🔄 Neue Sitzung starten"):
+                st.session_state.current_cards = []
+                st.session_state.current_card_index = 0
+                st.rerun()
         return
 
     card = st.session_state.current_cards[index]
-    st.markdown(f"**Karte {index+1} von {len(st.session_state.current_cards)}**")
-    result, feedback = render_card_study_ui(card)
 
-    if feedback:
-        st.info(feedback)
+    # Fortschrittsanzeige
+    progress = (index) / total_cards
+    st.progress(progress, text=f"Karte {index + 1} von {total_cards}")
 
-    if result in ["correct", "wrong", "skip"]:
-        update_card_after_result(card, result)
-        if st.button("Nächste Karte"):
-            st.session_state.current_card_index += 1
+    # Karte anzeigen und Interaktion handhaben
+    render_card_study_ui(card)
 
 
 def page_plan_and_calendar():
