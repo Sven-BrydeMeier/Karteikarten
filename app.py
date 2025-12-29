@@ -1,227 +1,4494 @@
-"""
-Unfall-Schadenmanagement App
-----------------------------
-Eine Streamlit-App zur Abwicklung von Verkehrsunfällen mit Dashboards
-für Werkstatt, Anwalt, Versicherer und Unfallopfer.
-"""
+import os
+import re
+import json
+import sqlite3
+import datetime as dt
+import random
+import base64
+import hashlib
+from dataclasses import dataclass, field
+from typing import List, Optional, Dict, Any, Tuple
+from io import BytesIO
+from collections import defaultdict
 
 import streamlit as st
-from auth import check_authentication, show_login_page
+from openai import OpenAI, RateLimitError as OpenAIRateLimitError, APIError as OpenAIAPIError
+from anthropic import Anthropic, RateLimitError as AnthropicRateLimitError, APIError as AnthropicAPIError
+from PIL import Image
+import pdfplumber
+from docx import Document
+import pytesseract
+from dotenv import load_dotenv
 
-# Seiten-Konfiguration
+# ============================================================
+# 0. Grund-Konfiguration Streamlit & .env
+# ============================================================
+
+# App-Version
+APP_VERSION = "2.1.2"
+APP_LAST_UPDATE = "2025-12-29"
+
+load_dotenv()  # .env-Datei laden, falls vorhanden
+
 st.set_page_config(
-    page_title="Schadenmanager",
-    page_icon="🚗",
+    page_title="Smart Study Cards",
+    page_icon="📚",
     layout="wide",
-    initial_sidebar_state="expanded"
 )
 
-# Custom CSS für modernes Dashboard-Design
+# Erweiterte Styles für Karten und Gamification
 st.markdown("""
 <style>
-    /* Globaler Hintergrund */
-    .stApp {
-        background-color: #f5f5f7;
-    }
-
-    /* Card-Styling */
-    .card {
-        background-color: #ffffff;
-        border-radius: 8px;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.07);
-        padding: 20px;
-        margin-bottom: 16px;
-    }
-
-    .card-header {
-        font-size: 1.2em;
-        font-weight: 600;
-        color: #1a1a2e;
-        margin-bottom: 12px;
-        border-bottom: 2px solid #0066cc;
-        padding-bottom: 8px;
-    }
-
-    /* Status-Badges */
-    .status-badge {
-        display: inline-block;
-        padding: 4px 12px;
-        border-radius: 16px;
-        font-size: 0.85em;
-        font-weight: 500;
-    }
-
-    .status-green {
-        background-color: #d4edda;
-        color: #155724;
-    }
-
-    .status-orange {
-        background-color: #fff3cd;
-        color: #856404;
-    }
-
-    .status-red {
-        background-color: #f8d7da;
-        color: #721c24;
-    }
-
-    /* Sidebar-Styling */
-    .css-1d391kg {
-        background-color: #ffffff;
-    }
-
-    /* Button-Styling */
-    .stButton>button {
-        background-color: #0066cc;
-        color: white;
-        border-radius: 6px;
-        border: none;
-        padding: 8px 16px;
-    }
-
-    .stButton>button:hover {
-        background-color: #0052a3;
-    }
+.question-card {
+    background-color: #ffffff;
+    padding: 1rem 1.25rem;
+    border-radius: 0.75rem;
+    box-shadow: 0 8px 24px rgba(15, 23, 42, 0.16);
+    border: 1px solid rgba(148, 163, 184, 0.35);
+    margin-bottom: 1rem;
+}
+.xp-bar {
+    background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+    height: 20px;
+    border-radius: 10px;
+    transition: width 0.5s ease;
+}
+.streak-badge {
+    background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+    color: white;
+    padding: 0.5rem 1rem;
+    border-radius: 20px;
+    font-weight: bold;
+    display: inline-block;
+}
+.achievement-card {
+    background: linear-gradient(135deg, #ffecd2 0%, #fcb69f 100%);
+    padding: 1rem;
+    border-radius: 10px;
+    text-align: center;
+    margin: 0.5rem;
+}
+.achievement-locked {
+    background: #e0e0e0;
+    filter: grayscale(100%);
+    opacity: 0.6;
+}
+.cloze-blank {
+    background-color: #fff3cd;
+    padding: 2px 8px;
+    border-radius: 4px;
+    border-bottom: 2px solid #ffc107;
+    min-width: 100px;
+    display: inline-block;
+}
+.pomodoro-timer {
+    font-size: 4rem;
+    font-weight: bold;
+    text-align: center;
+    font-family: monospace;
+}
+.heatmap-cell {
+    width: 12px;
+    height: 12px;
+    border-radius: 2px;
+    display: inline-block;
+    margin: 1px;
+}
 </style>
 """, unsafe_allow_html=True)
 
+# Gamification Konstanten
+LEVEL_XP_REQUIREMENTS = [0, 100, 250, 500, 1000, 2000, 3500, 5500, 8000, 12000, 18000, 26000, 36000, 50000]
+XP_PER_CORRECT = 10
+XP_PER_PARTIAL = 5
+XP_STREAK_BONUS = 5  # Extra XP pro Streak-Tag
 
-def render_card(title: str, content: str):
-    """Rendert eine Card mit Titel und Inhalt."""
-    st.markdown(f"""
-    <div class="card">
-        <div class="card-header">{title}</div>
-        <div>{content}</div>
-    </div>
-    """, unsafe_allow_html=True)
+ACHIEVEMENTS = {
+    "first_card": {"name": "Erste Schritte", "desc": "Erste Karteikarte gelernt", "icon": "🎯", "xp": 50},
+    "streak_3": {"name": "Auf Kurs", "desc": "3 Tage Streak", "icon": "🔥", "xp": 100},
+    "streak_7": {"name": "Wochenkrieger", "desc": "7 Tage Streak", "icon": "⚡", "xp": 250},
+    "streak_30": {"name": "Monatsmeister", "desc": "30 Tage Streak", "icon": "🏆", "xp": 1000},
+    "cards_50": {"name": "Fleißig", "desc": "50 Karten gelernt", "icon": "📚", "xp": 150},
+    "cards_100": {"name": "Bücherwurm", "desc": "100 Karten gelernt", "icon": "🐛", "xp": 300},
+    "cards_500": {"name": "Wissensriese", "desc": "500 Karten gelernt", "icon": "🦸", "xp": 750},
+    "perfect_session": {"name": "Perfektionist", "desc": "Session ohne Fehler", "icon": "💯", "xp": 200},
+    "night_owl": {"name": "Nachteule", "desc": "Nach 22 Uhr gelernt", "icon": "🦉", "xp": 50},
+    "early_bird": {"name": "Frühaufsteher", "desc": "Vor 7 Uhr gelernt", "icon": "🐦", "xp": 50},
+    "deck_master": {"name": "Deckmeister", "desc": "Ein Deck komplett gemeistert", "icon": "👑", "xp": 500},
+    "audio_learner": {"name": "Hörer", "desc": "Audio-Lernmodus genutzt", "icon": "🎧", "xp": 75},
+    "exam_passed": {"name": "Prüfungsbereit", "desc": "Erste Prüfungssimulation", "icon": "🎓", "xp": 150},
+    # Multiplayer Achievements
+    "first_duel": {"name": "Herausforderer", "desc": "Erstes Duell gespielt", "icon": "⚔️", "xp": 100},
+    "duel_winner": {"name": "Duellant", "desc": "Erstes Duell gewonnen", "icon": "🥇", "xp": 200},
+    "duel_master": {"name": "Duellmeister", "desc": "10 Duelle gewonnen", "icon": "🏅", "xp": 500},
+    "group_founder": {"name": "Gruppengruender", "desc": "Erste Lerngruppe erstellt", "icon": "👥", "xp": 150},
+    "team_player": {"name": "Teamplayer", "desc": "Einer Lerngruppe beigetreten", "icon": "🤝", "xp": 100},
+    "weekly_champion": {"name": "Wochen-Champion", "desc": "Wochen-Challenge gewonnen", "icon": "🎖️", "xp": 300},
+}
+
+# Multiplayer & Rang-System Konstanten
+RANK_SYSTEM = {
+    "bronze": {"name": "Bronze", "icon": "🥉", "min_xp": 0, "color": "#CD7F32"},
+    "silver": {"name": "Silber", "icon": "🥈", "min_xp": 1000, "color": "#C0C0C0"},
+    "gold": {"name": "Gold", "icon": "🥇", "min_xp": 5000, "color": "#FFD700"},
+    "platinum": {"name": "Platin", "icon": "💎", "min_xp": 15000, "color": "#E5E4E2"},
+    "diamond": {"name": "Diamant", "icon": "💠", "min_xp": 35000, "color": "#B9F2FF"},
+    "master": {"name": "Meister", "icon": "👑", "min_xp": 75000, "color": "#9400D3"},
+}
+
+CHALLENGE_TYPES = {
+    "daily_cards": {"name": "Tages-Challenge", "desc": "Lerne {target} Karten heute", "icon": "📅", "xp": 50},
+    "weekly_streak": {"name": "Wochen-Streak", "desc": "Halte deinen Streak 7 Tage", "icon": "🔥", "xp": 200},
+    "perfect_round": {"name": "Perfekte Runde", "desc": "10 Karten ohne Fehler", "icon": "💯", "xp": 100},
+    "speed_demon": {"name": "Blitzschnell", "desc": "20 Karten in 5 Minuten", "icon": "⚡", "xp": 150},
+    "group_challenge": {"name": "Gruppen-Challenge", "desc": "Gemeinsam {target} Karten", "icon": "👥", "xp": 300},
+}
+
+# Duell-Einstellungen
+DUEL_SETTINGS = {
+    "questions_per_round": 10,
+    "time_per_question": 30,  # Sekunden
+    "xp_per_win": 50,
+    "xp_per_correct": 5,
+    "xp_bonus_perfect": 100,
+}
+
+# Fach-Farbcode
+SUBJECT_COLORS = {
+    "Rechtswissenschaften": "#e0f2fe",  # hellblau
+    "Medizin": "#dcfce7",              # hellgrün
+    "Informatik": "#fef9c3",           # hellgelb
+    "Physik": "#fae8ff",               # helllila
+    "Andere": "#f5f5f5",
+}
 
 
-def main():
-    """Hauptfunktion der App."""
+# ============================================================
+# 1. Datenmodelle (Dataclasses)
+# ============================================================
 
-    # Authentifizierung prüfen
-    if not check_authentication():
-        show_login_page()
+@dataclass
+class Card:
+    id: int
+    deck_id: int
+    user_id: int
+    subject: str = "Allgemein"
+    question: str = ""
+    answer: str = ""
+    explanation: str = ""
+    choices: Optional[List[str]] = None
+    correct_choice_index: Optional[int] = None
+
+    # Spaced Repetition
+    box: int = 1
+    due_date: dt.date = field(default_factory=lambda: dt.date.today())
+    last_reviewed: Optional[dt.date] = None
+    success_streak: int = 0
+    in_special_bucket: bool = False
+    tags: List[str] = field(default_factory=list)
+
+
+@dataclass
+class CardDeck:
+    id: int
+    user_id: int
+    name: str
+    subject: str
+    topic: str
+    source_documents: List[int] = field(default_factory=list)
+    card_ids: List[int] = field(default_factory=list)
+
+
+@dataclass
+class StudyPlan:
+    id: int
+    user_id: int
+    start_date: dt.date
+    end_date: dt.date
+    topic_weights: Dict[str, float]
+    free_days: List[dt.date] = field(default_factory=list)
+    target_cards_per_day: int = 30
+
+
+@dataclass
+class StudySession:
+    id: int
+    user_id: int
+    date: dt.date
+    mode: str  # "cards", "audio", "video", "exam"
+    cards_seen: int = 0
+    cards_correct: int = 0
+    cards_incorrect: int = 0
+    cards_skipped: int = 0
+    time_spent_minutes: int = 0
+
+
+@dataclass
+class UserStats:
+    user_id: int
+    total_xp: int = 0
+    level: int = 1
+    current_streak: int = 0
+    longest_streak: int = 0
+    last_activity_date: Optional[dt.date] = None
+    total_cards_learned: int = 0
+    total_correct: int = 0
+    total_sessions: int = 0
+    achievements: List[str] = field(default_factory=list)
+
+
+@dataclass
+class CardNote:
+    id: int
+    card_id: int
+    user_id: int
+    note_text: str
+    created_at: dt.datetime
+
+
+@dataclass
+class ClozeCard:
+    """Lückentext-Karte mit {{c1::verstecktem Text}}"""
+    id: int
+    deck_id: int
+    user_id: int
+    subject: str
+    cloze_text: str  # "Der {{c1::Bundestag}} wählt den {{c2::Bundeskanzler}}"
+    explanation: str = ""
+    box: int = 1
+    due_date: dt.date = field(default_factory=lambda: dt.date.today())
+
+
+# ============================================================
+# 1b. Multiplayer Datenmodelle
+# ============================================================
+
+@dataclass
+class LearningGroup:
+    """Lerngruppe fuer gemeinsames Lernen und Wettbewerbe."""
+    id: int
+    name: str
+    description: str
+    creator_id: int
+    join_code: str  # 8-stelliger Code zum Beitreten
+    created_at: dt.datetime
+    is_public: bool = False
+    max_members: int = 20
+    weekly_xp_goal: int = 1000
+
+
+@dataclass
+class GroupMember:
+    """Mitglied einer Lerngruppe."""
+    id: int
+    group_id: int
+    user_id: int
+    username: str
+    joined_at: dt.datetime
+    role: str = "member"  # "admin", "member"
+    weekly_xp: int = 0
+    total_group_xp: int = 0
+
+
+@dataclass
+class Duel:
+    """Quiz-Duell zwischen zwei Spielern."""
+    id: int
+    challenger_id: int
+    opponent_id: int
+    deck_id: Optional[int]  # None = gemischte Karten
+    status: str  # "pending", "active", "completed", "declined"
+    created_at: dt.datetime
+    challenger_score: int = 0
+    opponent_score: int = 0
+    current_question: int = 0
+    winner_id: Optional[int] = None
+
+
+@dataclass
+class Challenge:
+    """Tages- oder Wochen-Challenge."""
+    id: int
+    challenge_type: str
+    target_value: int
+    start_date: dt.date
+    end_date: dt.date
+    group_id: Optional[int]  # None = persoenliche Challenge
+    xp_reward: int
+    is_completed: bool = False
+
+
+@dataclass
+class UserProfile:
+    """Erweitertes Benutzerprofil fuer Multiplayer.
+
+    HINWEIS: Fuer echtes Multiplayer wird ein Backend benoetigt (z.B. Supabase).
+    Diese Struktur ist vorbereitet fuer spaetere Backend-Integration.
+    """
+    user_id: int
+    username: str
+    display_name: str
+    avatar_emoji: str = "👤"
+    rank: str = "bronze"
+    duels_won: int = 0
+    duels_played: int = 0
+    groups: List[int] = field(default_factory=list)
+
+
+# ============================================================
+# 2. SQLite-Datenbank-Helfer
+# ============================================================
+
+DB_PATH = "study_app.db"
+
+
+def get_db_connection():
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def init_db_schema():
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS decks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            subject TEXT NOT NULL,
+            topic TEXT NOT NULL,
+            share_code TEXT,
+            is_public INTEGER DEFAULT 0
+        )
+        """)
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS cards (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            deck_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            subject TEXT NOT NULL,
+            question TEXT NOT NULL,
+            answer TEXT NOT NULL,
+            explanation TEXT,
+            choices_json TEXT,
+            correct_choice_index INTEGER,
+            box INTEGER NOT NULL DEFAULT 1,
+            due_date TEXT NOT NULL,
+            last_reviewed TEXT,
+            success_streak INTEGER NOT NULL DEFAULT 0,
+            in_special_bucket INTEGER NOT NULL DEFAULT 0,
+            tags_json TEXT,
+            card_type TEXT DEFAULT 'standard',
+            times_correct INTEGER DEFAULT 0,
+            times_wrong INTEGER DEFAULT 0,
+            FOREIGN KEY(deck_id) REFERENCES decks(id)
+        )
+        """)
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS study_plan (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            start_date TEXT NOT NULL,
+            end_date TEXT NOT NULL,
+            topic_weights_json TEXT,
+            free_days_json TEXT,
+            target_cards_per_day INTEGER NOT NULL
+        )
+        """)
+        # Gamification: User Stats
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS user_stats (
+            user_id INTEGER PRIMARY KEY,
+            total_xp INTEGER DEFAULT 0,
+            level INTEGER DEFAULT 1,
+            current_streak INTEGER DEFAULT 0,
+            longest_streak INTEGER DEFAULT 0,
+            last_activity_date TEXT,
+            total_cards_learned INTEGER DEFAULT 0,
+            total_correct INTEGER DEFAULT 0,
+            total_sessions INTEGER DEFAULT 0,
+            achievements_json TEXT DEFAULT '[]'
+        )
+        """)
+        # Study Sessions für Analytik
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS study_sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            date TEXT NOT NULL,
+            start_time TEXT,
+            end_time TEXT,
+            mode TEXT NOT NULL,
+            cards_seen INTEGER DEFAULT 0,
+            cards_correct INTEGER DEFAULT 0,
+            cards_incorrect INTEGER DEFAULT 0,
+            cards_skipped INTEGER DEFAULT 0,
+            time_spent_minutes INTEGER DEFAULT 0,
+            xp_earned INTEGER DEFAULT 0
+        )
+        """)
+        # Notizen zu Karten
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS card_notes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            card_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            note_text TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(card_id) REFERENCES cards(id)
+        )
+        """)
+        # Lückentext-Karten (Cloze)
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS cloze_cards (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            deck_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            subject TEXT NOT NULL,
+            cloze_text TEXT NOT NULL,
+            explanation TEXT,
+            box INTEGER DEFAULT 1,
+            due_date TEXT NOT NULL,
+            times_correct INTEGER DEFAULT 0,
+            times_wrong INTEGER DEFAULT 0,
+            FOREIGN KEY(deck_id) REFERENCES decks(id)
+        )
+        """)
+        # Chat-Verlauf für KI-Tutor
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS tutor_chat (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            timestamp TEXT NOT NULL,
+            topic TEXT
+        )
+        """)
+
+        # ============================================================
+        # MULTIPLAYER TABELLEN
+        # HINWEIS: Diese Tabellen sind fuer lokale Demo vorbereitet.
+        # Fuer echtes Multiplayer wird ein Backend benoetigt (z.B. Supabase).
+        # ============================================================
+
+        # Benutzerprofile fuer Multiplayer
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS user_profiles (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT UNIQUE NOT NULL,
+            display_name TEXT NOT NULL,
+            avatar_emoji TEXT DEFAULT '👤',
+            rank TEXT DEFAULT 'bronze',
+            duels_won INTEGER DEFAULT 0,
+            duels_played INTEGER DEFAULT 0,
+            created_at TEXT NOT NULL
+        )
+        """)
+
+        # Lerngruppen
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS learning_groups (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            description TEXT,
+            creator_id INTEGER NOT NULL,
+            join_code TEXT UNIQUE NOT NULL,
+            created_at TEXT NOT NULL,
+            is_public INTEGER DEFAULT 0,
+            max_members INTEGER DEFAULT 20,
+            weekly_xp_goal INTEGER DEFAULT 1000
+        )
+        """)
+
+        # Gruppen-Mitgliedschaften
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS group_members (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            group_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            username TEXT NOT NULL,
+            joined_at TEXT NOT NULL,
+            role TEXT DEFAULT 'member',
+            weekly_xp INTEGER DEFAULT 0,
+            total_group_xp INTEGER DEFAULT 0,
+            FOREIGN KEY(group_id) REFERENCES learning_groups(id),
+            UNIQUE(group_id, user_id)
+        )
+        """)
+
+        # Duelle
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS duels (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            challenger_id INTEGER NOT NULL,
+            opponent_id INTEGER NOT NULL,
+            deck_id INTEGER,
+            status TEXT DEFAULT 'pending',
+            created_at TEXT NOT NULL,
+            challenger_score INTEGER DEFAULT 0,
+            opponent_score INTEGER DEFAULT 0,
+            current_question INTEGER DEFAULT 0,
+            questions_json TEXT,
+            winner_id INTEGER,
+            FOREIGN KEY(deck_id) REFERENCES decks(id)
+        )
+        """)
+
+        # Challenges (Tages-/Wochen-Herausforderungen)
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS challenges (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            group_id INTEGER,
+            challenge_type TEXT NOT NULL,
+            target_value INTEGER NOT NULL,
+            current_value INTEGER DEFAULT 0,
+            start_date TEXT NOT NULL,
+            end_date TEXT NOT NULL,
+            xp_reward INTEGER NOT NULL,
+            is_completed INTEGER DEFAULT 0,
+            FOREIGN KEY(group_id) REFERENCES learning_groups(id)
+        )
+        """)
+
+        # Gruppen-Leaderboard (wöchentlich)
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS group_leaderboard (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            group_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            username TEXT NOT NULL,
+            week_start TEXT NOT NULL,
+            xp_earned INTEGER DEFAULT 0,
+            cards_learned INTEGER DEFAULT 0,
+            duels_won INTEGER DEFAULT 0,
+            FOREIGN KEY(group_id) REFERENCES learning_groups(id),
+            UNIQUE(group_id, user_id, week_start)
+        )
+        """)
+
+        conn.commit()
+
+
+def row_to_card(row: sqlite3.Row) -> Card:
+    return Card(
+        id=row["id"],
+        deck_id=row["deck_id"],
+        user_id=row["user_id"],
+        subject=row["subject"],
+        question=row["question"],
+        answer=row["answer"],
+        explanation=row["explanation"] or "",
+        choices=json.loads(row["choices_json"]) if row["choices_json"] else None,
+        correct_choice_index=row["correct_choice_index"],
+        box=row["box"],
+        due_date=dt.date.fromisoformat(row["due_date"]),
+        last_reviewed=dt.date.fromisoformat(row["last_reviewed"]) if row["last_reviewed"] else None,
+        success_streak=row["success_streak"],
+        in_special_bucket=bool(row["in_special_bucket"]),
+        tags=json.loads(row["tags_json"]) if row["tags_json"] else [],
+    )
+
+
+def db_create_deck(user_id: int, name: str, subject: str, topic: str) -> CardDeck:
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        c.execute(
+            "INSERT INTO decks (user_id, name, subject, topic) VALUES (?, ?, ?, ?)",
+            (user_id, name, subject, topic),
+        )
+        deck_id = c.lastrowid
+        conn.commit()
+    return CardDeck(id=deck_id, user_id=user_id, name=name, subject=subject, topic=topic)
+
+
+def db_get_decks(user_id: int) -> List[CardDeck]:
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        c.execute("SELECT * FROM decks WHERE user_id=? ORDER BY id DESC", (user_id,))
+        rows = c.fetchall()
+    decks: List[CardDeck] = []
+    for r in rows:
+        decks.append(CardDeck(
+            id=r["id"],
+            user_id=r["user_id"],
+            name=r["name"],
+            subject=r["subject"],
+            topic=r["topic"],
+        ))
+    return decks
+
+
+def db_insert_card(card: Card) -> int:
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        c.execute("""
+            INSERT INTO cards (
+                deck_id, user_id, subject, question, answer, explanation,
+                choices_json, correct_choice_index, box, due_date,
+                last_reviewed, success_streak, in_special_bucket, tags_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            card.deck_id,
+            card.user_id,
+            card.subject,
+            card.question,
+            card.answer,
+            card.explanation,
+            json.dumps(card.choices) if card.choices is not None else None,
+            card.correct_choice_index,
+            card.box,
+            card.due_date.isoformat(),
+            card.last_reviewed.isoformat() if card.last_reviewed else None,
+            card.success_streak,
+            1 if card.in_special_bucket else 0,
+            json.dumps(card.tags) if card.tags else None,
+        ))
+        card_id = c.lastrowid
+        conn.commit()
+    return card_id
+
+
+def db_get_cards_by_deck(deck_id: int, user_id: int) -> List[Card]:
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        c.execute(
+            "SELECT * FROM cards WHERE deck_id=? AND user_id=? ORDER BY id",
+            (deck_id, user_id),
+        )
+        rows = c.fetchall()
+    return [row_to_card(r) for r in rows]
+
+
+def db_get_all_cards(user_id: int) -> List[Card]:
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        c.execute("SELECT * FROM cards WHERE user_id=?", (user_id,))
+        rows = c.fetchall()
+    return [row_to_card(r) for r in rows]
+
+
+def db_update_card_spaced(card: Card):
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        c.execute("""
+            UPDATE cards
+            SET box=?, due_date=?, last_reviewed=?, success_streak=?, in_special_bucket=?
+            WHERE id=?
+        """, (
+            card.box,
+            card.due_date.isoformat(),
+            card.last_reviewed.isoformat() if card.last_reviewed else None,
+            card.success_streak,
+            1 if card.in_special_bucket else 0,
+            card.id,
+        ))
+        conn.commit()
+
+
+def db_select_next_due_cards(user_id: int, deck_id: Optional[int], max_cards: int, include_special_bucket: bool) -> List[Card]:
+    today_str = dt.date.today().isoformat()
+    cards: List[Card] = []
+    seen_ids = set()
+
+    with get_db_connection() as conn:
+        c = conn.cursor()
+
+        params = [user_id]
+        deck_filter = ""
+        if deck_id is not None:
+            deck_filter = " AND deck_id=?"
+            params.append(deck_id)
+
+        if include_special_bucket:
+            c.execute(
+                f"SELECT * FROM cards WHERE user_id=?{deck_filter} AND in_special_bucket=1 ORDER BY due_date ASC, id ASC",
+                params,
+            )
+            for row in c.fetchall():
+                card = row_to_card(row)
+                cards.append(card)
+                seen_ids.add(card.id)
+
+        c.execute(
+            f"""
+            SELECT * FROM cards
+            WHERE user_id=?{deck_filter}
+              AND in_special_bucket=0
+              AND due_date<=?
+            ORDER BY due_date ASC, id ASC
+            """,
+            params + [today_str],
+        )
+        for row in c.fetchall():
+            card = row_to_card(row)
+            if card.id not in seen_ids:
+                cards.append(card)
+                seen_ids.add(card.id)
+
+    return cards[:max_cards]
+
+
+def get_or_create_study_plan(user_id: int) -> StudyPlan:
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        c.execute("SELECT * FROM study_plan WHERE user_id=?", (user_id,))
+        row = c.fetchone()
+        if row:
+            plan = StudyPlan(
+                id=row["id"],
+                user_id=row["user_id"],
+                start_date=dt.date.fromisoformat(row["start_date"]),
+                end_date=dt.date.fromisoformat(row["end_date"]),
+                topic_weights=json.loads(row["topic_weights_json"]) if row["topic_weights_json"] else {},
+                free_days=[dt.date.fromisoformat(d) for d in json.loads(row["free_days_json"])] if row["free_days_json"] else [],
+                target_cards_per_day=row["target_cards_per_day"],
+            )
+            return plan
+        else:
+            today = dt.date.today()
+            plan = StudyPlan(
+                id=0,
+                user_id=user_id,
+                start_date=today,
+                end_date=today + dt.timedelta(days=90),
+                topic_weights={},
+                free_days=[],
+                target_cards_per_day=30,
+            )
+            c.execute(
+                """
+                INSERT INTO study_plan (user_id, start_date, end_date, topic_weights_json, free_days_json, target_cards_per_day)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    user_id,
+                    plan.start_date.isoformat(),
+                    plan.end_date.isoformat(),
+                    json.dumps(plan.topic_weights),
+                    json.dumps([d.isoformat() for d in plan.free_days]),
+                    plan.target_cards_per_day,
+                ),
+            )
+            plan.id = c.lastrowid
+            conn.commit()
+            return plan
+
+
+def db_update_study_plan(plan: StudyPlan):
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        c.execute(
+            """
+            UPDATE study_plan
+            SET start_date=?, end_date=?, topic_weights_json=?, free_days_json=?, target_cards_per_day=?
+            WHERE id=?
+            """,
+            (
+                plan.start_date.isoformat(),
+                plan.end_date.isoformat(),
+                json.dumps(plan.topic_weights),
+                json.dumps([d.isoformat() for d in plan.free_days]),
+                plan.target_cards_per_day,
+                plan.id,
+            ),
+        )
+        conn.commit()
+
+
+# ============================================================
+# 2b. Gamification & Analytics Datenbank-Funktionen
+# ============================================================
+
+def get_or_create_user_stats(user_id: int) -> UserStats:
+    """Holt oder erstellt User-Statistiken für Gamification."""
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        c.execute("SELECT * FROM user_stats WHERE user_id=?", (user_id,))
+        row = c.fetchone()
+        if row:
+            return UserStats(
+                user_id=row["user_id"],
+                total_xp=row["total_xp"],
+                level=row["level"],
+                current_streak=row["current_streak"],
+                longest_streak=row["longest_streak"],
+                last_activity_date=dt.date.fromisoformat(row["last_activity_date"]) if row["last_activity_date"] else None,
+                total_cards_learned=row["total_cards_learned"],
+                total_correct=row["total_correct"],
+                total_sessions=row["total_sessions"],
+                achievements=json.loads(row["achievements_json"]) if row["achievements_json"] else [],
+            )
+        else:
+            c.execute(
+                "INSERT INTO user_stats (user_id) VALUES (?)",
+                (user_id,)
+            )
+            conn.commit()
+            return UserStats(user_id=user_id)
+
+
+def db_update_user_stats(stats: UserStats):
+    """Speichert aktualisierte User-Statistiken."""
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        c.execute("""
+            UPDATE user_stats SET
+                total_xp=?, level=?, current_streak=?, longest_streak=?,
+                last_activity_date=?, total_cards_learned=?, total_correct=?,
+                total_sessions=?, achievements_json=?
+            WHERE user_id=?
+        """, (
+            stats.total_xp, stats.level, stats.current_streak, stats.longest_streak,
+            stats.last_activity_date.isoformat() if stats.last_activity_date else None,
+            stats.total_cards_learned, stats.total_correct, stats.total_sessions,
+            json.dumps(stats.achievements), stats.user_id
+        ))
+        conn.commit()
+
+
+def calculate_level(xp: int) -> int:
+    """Berechnet das Level basierend auf XP."""
+    for i, required_xp in enumerate(LEVEL_XP_REQUIREMENTS):
+        if xp < required_xp:
+            return max(1, i)
+    return len(LEVEL_XP_REQUIREMENTS)
+
+
+def get_xp_for_next_level(current_xp: int) -> Tuple[int, int]:
+    """Gibt (XP für aktuelles Level, XP für nächstes Level) zurück."""
+    level = calculate_level(current_xp)
+    current_level_xp = LEVEL_XP_REQUIREMENTS[level - 1] if level > 0 else 0
+    next_level_xp = LEVEL_XP_REQUIREMENTS[level] if level < len(LEVEL_XP_REQUIREMENTS) else current_xp
+    return current_level_xp, next_level_xp
+
+
+def update_streak(stats: UserStats) -> bool:
+    """Aktualisiert den Streak und gibt True zurück wenn neuer Tag."""
+    today = dt.date.today()
+    if stats.last_activity_date is None:
+        stats.current_streak = 1
+        stats.last_activity_date = today
+        return True
+
+    days_diff = (today - stats.last_activity_date).days
+
+    if days_diff == 0:
+        return False  # Gleicher Tag
+    elif days_diff == 1:
+        stats.current_streak += 1
+        stats.last_activity_date = today
+        if stats.current_streak > stats.longest_streak:
+            stats.longest_streak = stats.current_streak
+        return True
+    else:
+        stats.current_streak = 1
+        stats.last_activity_date = today
+        return True
+
+
+def check_and_award_achievements(stats: UserStats) -> List[str]:
+    """Prüft und vergibt neue Achievements. Gibt Liste neuer Achievements zurück."""
+    new_achievements = []
+
+    # Erste Karte
+    if "first_card" not in stats.achievements and stats.total_cards_learned >= 1:
+        stats.achievements.append("first_card")
+        new_achievements.append("first_card")
+
+    # Streak Achievements
+    if "streak_3" not in stats.achievements and stats.current_streak >= 3:
+        stats.achievements.append("streak_3")
+        new_achievements.append("streak_3")
+    if "streak_7" not in stats.achievements and stats.current_streak >= 7:
+        stats.achievements.append("streak_7")
+        new_achievements.append("streak_7")
+    if "streak_30" not in stats.achievements and stats.current_streak >= 30:
+        stats.achievements.append("streak_30")
+        new_achievements.append("streak_30")
+
+    # Karten-Meilensteine
+    if "cards_50" not in stats.achievements and stats.total_cards_learned >= 50:
+        stats.achievements.append("cards_50")
+        new_achievements.append("cards_50")
+    if "cards_100" not in stats.achievements and stats.total_cards_learned >= 100:
+        stats.achievements.append("cards_100")
+        new_achievements.append("cards_100")
+    if "cards_500" not in stats.achievements and stats.total_cards_learned >= 500:
+        stats.achievements.append("cards_500")
+        new_achievements.append("cards_500")
+
+    # Zeit-basierte Achievements
+    current_hour = dt.datetime.now().hour
+    if "night_owl" not in stats.achievements and current_hour >= 22:
+        stats.achievements.append("night_owl")
+        new_achievements.append("night_owl")
+    if "early_bird" not in stats.achievements and current_hour < 7:
+        stats.achievements.append("early_bird")
+        new_achievements.append("early_bird")
+
+    # XP für neue Achievements hinzufügen
+    for ach_id in new_achievements:
+        stats.total_xp += ACHIEVEMENTS[ach_id]["xp"]
+
+    return new_achievements
+
+
+def award_xp(stats: UserStats, xp_amount: int, result: str = "correct"):
+    """Vergibt XP und aktualisiert Level."""
+    bonus = stats.current_streak * XP_STREAK_BONUS if stats.current_streak > 1 else 0
+    total_xp = xp_amount + bonus
+    stats.total_xp += total_xp
+    stats.level = calculate_level(stats.total_xp)
+    return total_xp
+
+
+def db_save_study_session(user_id: int, mode: str, cards_seen: int, cards_correct: int,
+                          cards_incorrect: int, cards_skipped: int, time_minutes: int, xp_earned: int):
+    """Speichert eine Lernsession in der Datenbank."""
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        now = dt.datetime.now()
+        c.execute("""
+            INSERT INTO study_sessions
+            (user_id, date, start_time, mode, cards_seen, cards_correct, cards_incorrect, cards_skipped, time_spent_minutes, xp_earned)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            user_id, now.date().isoformat(), now.isoformat(), mode,
+            cards_seen, cards_correct, cards_incorrect, cards_skipped, time_minutes, xp_earned
+        ))
+        conn.commit()
+
+
+def db_get_study_sessions(user_id: int, days: int = 30) -> List[Dict]:
+    """Holt Lernsessions der letzten X Tage."""
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        cutoff = (dt.date.today() - dt.timedelta(days=days)).isoformat()
+        c.execute("""
+            SELECT * FROM study_sessions
+            WHERE user_id=? AND date >= ?
+            ORDER BY date DESC
+        """, (user_id, cutoff))
+        return [dict(row) for row in c.fetchall()]
+
+
+def db_get_activity_heatmap(user_id: int, days: int = 365) -> Dict[str, int]:
+    """Holt Aktivitätsdaten für Heatmap (Datum -> Anzahl Karten)."""
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        cutoff = (dt.date.today() - dt.timedelta(days=days)).isoformat()
+        c.execute("""
+            SELECT date, SUM(cards_seen) as total
+            FROM study_sessions
+            WHERE user_id=? AND date >= ?
+            GROUP BY date
+        """, (user_id, cutoff))
+        return {row["date"]: row["total"] for row in c.fetchall()}
+
+
+def db_get_weakness_analysis(user_id: int) -> List[Dict]:
+    """Analysiert Schwächen basierend auf Fehlerquote pro Thema."""
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        c.execute("""
+            SELECT subject,
+                   COUNT(*) as total,
+                   SUM(times_wrong) as wrong,
+                   SUM(times_correct) as correct,
+                   AVG(CASE WHEN times_correct + times_wrong > 0
+                       THEN CAST(times_wrong AS FLOAT) / (times_correct + times_wrong)
+                       ELSE 0 END) as error_rate
+            FROM cards
+            WHERE user_id=? AND (times_correct > 0 OR times_wrong > 0)
+            GROUP BY subject
+            ORDER BY error_rate DESC
+        """, (user_id,))
+        return [dict(row) for row in c.fetchall()]
+
+
+def db_get_best_study_times(user_id: int) -> Dict[int, float]:
+    """Analysiert die besten Lernzeiten basierend auf Erfolgsquote."""
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        c.execute("""
+            SELECT start_time, cards_correct, cards_seen
+            FROM study_sessions
+            WHERE user_id=? AND cards_seen > 0
+        """, (user_id,))
+
+        hour_stats = defaultdict(lambda: {"correct": 0, "total": 0})
+        for row in c.fetchall():
+            if row["start_time"]:
+                hour = dt.datetime.fromisoformat(row["start_time"]).hour
+                hour_stats[hour]["correct"] += row["cards_correct"]
+                hour_stats[hour]["total"] += row["cards_seen"]
+
+        return {
+            hour: stats["correct"] / stats["total"] if stats["total"] > 0 else 0
+            for hour, stats in hour_stats.items()
+        }
+
+
+# ============================================================
+# 2c. Notizen & Chat Funktionen
+# ============================================================
+
+def db_save_card_note(card_id: int, user_id: int, note_text: str):
+    """Speichert eine Notiz zu einer Karte."""
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        c.execute("""
+            INSERT INTO card_notes (card_id, user_id, note_text, created_at)
+            VALUES (?, ?, ?, ?)
+        """, (card_id, user_id, note_text, dt.datetime.now().isoformat()))
+        conn.commit()
+
+
+def db_get_card_notes(card_id: int, user_id: int) -> List[CardNote]:
+    """Holt alle Notizen zu einer Karte."""
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        c.execute("""
+            SELECT * FROM card_notes WHERE card_id=? AND user_id=?
+            ORDER BY created_at DESC
+        """, (card_id, user_id))
+        return [CardNote(
+            id=row["id"],
+            card_id=row["card_id"],
+            user_id=row["user_id"],
+            note_text=row["note_text"],
+            created_at=dt.datetime.fromisoformat(row["created_at"])
+        ) for row in c.fetchall()]
+
+
+def db_save_tutor_message(user_id: int, role: str, content: str, topic: str = None):
+    """Speichert eine Chat-Nachricht mit dem KI-Tutor."""
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        c.execute("""
+            INSERT INTO tutor_chat (user_id, role, content, timestamp, topic)
+            VALUES (?, ?, ?, ?, ?)
+        """, (user_id, role, content, dt.datetime.now().isoformat(), topic))
+        conn.commit()
+
+
+def db_get_tutor_chat(user_id: int, limit: int = 20) -> List[Dict]:
+    """Holt die letzten Chat-Nachrichten."""
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        c.execute("""
+            SELECT * FROM tutor_chat WHERE user_id=?
+            ORDER BY timestamp DESC LIMIT ?
+        """, (user_id, limit))
+        return [dict(row) for row in c.fetchall()][::-1]  # Umkehren für chronologische Reihenfolge
+
+
+def db_clear_tutor_chat(user_id: int):
+    """Löscht den Chat-Verlauf."""
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        c.execute("DELETE FROM tutor_chat WHERE user_id=?", (user_id,))
+        conn.commit()
+
+
+# ============================================================
+# 2d. Import/Export Funktionen
+# ============================================================
+
+def export_deck_to_json(deck_id: int, user_id: int) -> str:
+    """Exportiert ein Deck als JSON."""
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        c.execute("SELECT * FROM decks WHERE id=? AND user_id=?", (deck_id, user_id))
+        deck_row = c.fetchone()
+        if not deck_row:
+            return None
+
+        c.execute("SELECT * FROM cards WHERE deck_id=? AND user_id=?", (deck_id, user_id))
+        cards = [dict(row) for row in c.fetchall()]
+
+        export_data = {
+            "version": "1.0",
+            "deck": {
+                "name": deck_row["name"],
+                "subject": deck_row["subject"],
+                "topic": deck_row["topic"]
+            },
+            "cards": [{
+                "question": card["question"],
+                "answer": card["answer"],
+                "explanation": card["explanation"],
+                "choices": json.loads(card["choices_json"]) if card["choices_json"] else None,
+                "correct_choice_index": card["correct_choice_index"],
+                "tags": json.loads(card["tags_json"]) if card["tags_json"] else []
+            } for card in cards]
+        }
+        return json.dumps(export_data, ensure_ascii=False, indent=2)
+
+
+def export_deck_to_csv(deck_id: int, user_id: int) -> str:
+    """Exportiert ein Deck als CSV."""
+    cards = db_get_cards_by_deck(deck_id, user_id)
+    lines = ["Frage;Antwort;Erklärung;Tags"]
+    for card in cards:
+        tags = ",".join(card.tags) if card.tags else ""
+        line = f'"{card.question}";"{card.answer}";"{card.explanation}";"{tags}"'
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def import_deck_from_json(json_str: str, user_id: int) -> Tuple[bool, str]:
+    """Importiert ein Deck aus JSON. Gibt (Erfolg, Nachricht) zurück."""
+    try:
+        data = json.loads(json_str)
+        deck_info = data.get("deck", {})
+        cards_data = data.get("cards", [])
+
+        if not deck_info or not cards_data:
+            return False, "Ungültiges JSON-Format"
+
+        deck = db_create_deck(
+            user_id,
+            deck_info.get("name", "Importiertes Deck"),
+            deck_info.get("subject", "Andere"),
+            deck_info.get("topic", "Import")
+        )
+
+        for card_data in cards_data:
+            card = Card(
+                id=0,
+                deck_id=deck.id,
+                user_id=user_id,
+                subject=deck_info.get("subject", "Andere"),
+                question=card_data.get("question", ""),
+                answer=card_data.get("answer", ""),
+                explanation=card_data.get("explanation", ""),
+                choices=card_data.get("choices"),
+                correct_choice_index=card_data.get("correct_choice_index"),
+                tags=card_data.get("tags", [])
+            )
+            db_insert_card(card)
+
+        return True, f"Deck '{deck.name}' mit {len(cards_data)} Karten importiert!"
+    except Exception as e:
+        return False, f"Import-Fehler: {str(e)}"
+
+
+def generate_share_code(deck_id: int) -> str:
+    """Generiert einen eindeutigen Share-Code für ein Deck."""
+    code = hashlib.md5(f"{deck_id}-{dt.datetime.now().isoformat()}".encode()).hexdigest()[:8].upper()
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        c.execute("UPDATE decks SET share_code=? WHERE id=?", (code, deck_id))
+        conn.commit()
+    return code
+
+
+def import_deck_by_share_code(share_code: str, user_id: int) -> Tuple[bool, str]:
+    """Importiert ein Deck über einen Share-Code."""
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        c.execute("SELECT * FROM decks WHERE share_code=?", (share_code,))
+        source_deck = c.fetchone()
+
+        if not source_deck:
+            return False, "Share-Code nicht gefunden."
+
+        # Deck und Karten kopieren
+        new_deck = db_create_deck(
+            user_id,
+            f"{source_deck['name']} (kopiert)",
+            source_deck["subject"],
+            source_deck["topic"]
+        )
+
+        c.execute("SELECT * FROM cards WHERE deck_id=?", (source_deck["id"],))
+        cards = c.fetchall()
+
+        for card_row in cards:
+            card = Card(
+                id=0,
+                deck_id=new_deck.id,
+                user_id=user_id,
+                subject=card_row["subject"],
+                question=card_row["question"],
+                answer=card_row["answer"],
+                explanation=card_row["explanation"] or "",
+                choices=json.loads(card_row["choices_json"]) if card_row["choices_json"] else None,
+                correct_choice_index=card_row["correct_choice_index"]
+            )
+            db_insert_card(card)
+
+        return True, f"Deck '{new_deck.name}' mit {len(cards)} Karten importiert!"
+
+
+# ============================================================
+# 2e. Cloze (Lückentext) Funktionen
+# ============================================================
+
+def parse_cloze_text(cloze_text: str) -> List[Tuple[str, str]]:
+    """Parst Lückentext und gibt [(id, versteckter_text), ...] zurück."""
+    pattern = r'\{\{c(\d+)::([^}]+)\}\}'
+    return re.findall(pattern, cloze_text)
+
+
+def render_cloze_with_blanks(cloze_text: str, reveal_ids: List[str] = None) -> str:
+    """Rendert Lückentext mit Lücken oder aufgedeckten Antworten."""
+    if reveal_ids is None:
+        reveal_ids = []
+
+    def replace_cloze(match):
+        cloze_id = match.group(1)
+        cloze_content = match.group(2)
+        if cloze_id in reveal_ids:
+            return f'<span style="background-color:#90EE90;padding:2px 6px;border-radius:4px;">{cloze_content}</span>'
+        else:
+            return f'<span class="cloze-blank">[...]</span>'
+
+    return re.sub(r'\{\{c(\d+)::([^}]+)\}\}', replace_cloze, cloze_text)
+
+
+def db_insert_cloze_card(deck_id: int, user_id: int, subject: str, cloze_text: str, explanation: str = "") -> int:
+    """Fügt eine Lückentext-Karte hinzu."""
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        c.execute("""
+            INSERT INTO cloze_cards (deck_id, user_id, subject, cloze_text, explanation, due_date)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (deck_id, user_id, subject, cloze_text, explanation, dt.date.today().isoformat()))
+        conn.commit()
+        return c.lastrowid
+
+
+def db_get_cloze_cards(deck_id: int, user_id: int) -> List[Dict]:
+    """Holt alle Lückentext-Karten eines Decks."""
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        c.execute("SELECT * FROM cloze_cards WHERE deck_id=? AND user_id=?", (deck_id, user_id))
+        return [dict(row) for row in c.fetchall()]
+
+
+# ============================================================
+# 2f. Multiplayer Datenbank-Funktionen
+# HINWEIS: Fuer echtes Multiplayer wird ein Backend benoetigt.
+# Diese Funktionen simulieren Multiplayer lokal.
+# ============================================================
+
+def get_user_rank(xp: int) -> Dict:
+    """Ermittelt den Rang basierend auf XP."""
+    current_rank = RANK_SYSTEM["bronze"]
+    for rank_id, rank_data in RANK_SYSTEM.items():
+        if xp >= rank_data["min_xp"]:
+            current_rank = {**rank_data, "id": rank_id}
+    return current_rank
+
+
+def get_or_create_user_profile(user_id: int, username: str = None) -> Dict:
+    """Holt oder erstellt ein Benutzerprofil."""
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        c.execute("SELECT * FROM user_profiles WHERE user_id=?", (user_id,))
+        row = c.fetchone()
+
+        if row:
+            return dict(row)
+
+        # Neues Profil erstellen
+        if not username:
+            username = f"Spieler_{user_id}"
+
+        c.execute("""
+            INSERT INTO user_profiles (user_id, username, display_name, created_at)
+            VALUES (?, ?, ?, ?)
+        """, (user_id, username, username, dt.datetime.now().isoformat()))
+        conn.commit()
+
+        return {
+            "user_id": user_id,
+            "username": username,
+            "display_name": username,
+            "avatar_emoji": "👤",
+            "rank": "bronze",
+            "duels_won": 0,
+            "duels_played": 0
+        }
+
+
+def db_update_user_profile(user_id: int, **kwargs):
+    """Aktualisiert Benutzerprofil-Felder."""
+    allowed_fields = ["username", "display_name", "avatar_emoji", "rank", "duels_won", "duels_played"]
+    updates = {k: v for k, v in kwargs.items() if k in allowed_fields}
+
+    if not updates:
         return
 
-    # Sidebar Navigation
-    with st.sidebar:
-        st.markdown("### Navigation")
-
-        # Benutzer-Info
-        user = st.session_state.get("user", {})
-        role = user.get("role", "Unbekannt")
-        username = user.get("username", "Gast")
-
-        st.markdown(f"""
-        <div class="card">
-            <strong>Angemeldet als:</strong><br>
-            {username}<br>
-            <small>Rolle: {role}</small>
-        </div>
-        """, unsafe_allow_html=True)
-
-        # Menü je nach Rolle
-        menu_items = get_menu_for_role(role)
-        selected_page = st.radio("Bereich wählen:", menu_items, label_visibility="collapsed")
-
-        st.markdown("---")
-        if st.button("Abmelden", use_container_width=True):
-            st.session_state.clear()
-            st.rerun()
-
-    # Hauptinhalt basierend auf Auswahl
-    render_page(selected_page, role)
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        set_clause = ", ".join([f"{k}=?" for k in updates.keys()])
+        values = list(updates.values()) + [user_id]
+        c.execute(f"UPDATE user_profiles SET {set_clause} WHERE user_id=?", values)
+        conn.commit()
 
 
-def get_menu_for_role(role: str) -> list:
-    """Gibt die Menüpunkte basierend auf der Benutzerrolle zurück."""
-    base_menu = ["Dashboard", "Projekte"]
+def db_create_learning_group(name: str, description: str, creator_id: int, creator_username: str) -> Dict:
+    """Erstellt eine neue Lerngruppe."""
+    join_code = hashlib.md5(f"{name}-{creator_id}-{dt.datetime.now().isoformat()}".encode()).hexdigest()[:8].upper()
 
-    role_menus = {
-        "Werkstatt": ["Ersatzwagen", "Rechnungen & Zahlungen"],
-        "Anwalt": ["Mandate", "Gebühren & Streitwert", "Korrespondenz"],
-        "Versicherung": ["Regulierung", "Gutachten", "Statistiken"],
-        "Unfallopfer": ["Mein Fall", "Dokumente", "Status"]
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        now = dt.datetime.now().isoformat()
+
+        c.execute("""
+            INSERT INTO learning_groups (name, description, creator_id, join_code, created_at)
+            VALUES (?, ?, ?, ?, ?)
+        """, (name, description, creator_id, join_code, now))
+        group_id = c.lastrowid
+
+        # Ersteller als Admin hinzufuegen
+        c.execute("""
+            INSERT INTO group_members (group_id, user_id, username, joined_at, role)
+            VALUES (?, ?, ?, ?, 'admin')
+        """, (group_id, creator_id, creator_username, now))
+
+        conn.commit()
+
+        return {
+            "id": group_id,
+            "name": name,
+            "description": description,
+            "join_code": join_code,
+            "creator_id": creator_id
+        }
+
+
+def db_join_group_by_code(join_code: str, user_id: int, username: str) -> Tuple[bool, str]:
+    """Tritt einer Gruppe per Code bei."""
+    with get_db_connection() as conn:
+        c = conn.cursor()
+
+        # Gruppe finden
+        c.execute("SELECT * FROM learning_groups WHERE join_code=?", (join_code.upper(),))
+        group = c.fetchone()
+
+        if not group:
+            return False, "Gruppe nicht gefunden. Pruefe den Beitrittscode."
+
+        # Pruefen ob bereits Mitglied
+        c.execute("SELECT * FROM group_members WHERE group_id=? AND user_id=?",
+                 (group["id"], user_id))
+        if c.fetchone():
+            return False, "Du bist bereits Mitglied dieser Gruppe."
+
+        # Pruefen ob Gruppe voll
+        c.execute("SELECT COUNT(*) as count FROM group_members WHERE group_id=?", (group["id"],))
+        member_count = c.fetchone()["count"]
+        if member_count >= group["max_members"]:
+            return False, "Diese Gruppe ist bereits voll."
+
+        # Beitreten
+        c.execute("""
+            INSERT INTO group_members (group_id, user_id, username, joined_at)
+            VALUES (?, ?, ?, ?)
+        """, (group["id"], user_id, username, dt.datetime.now().isoformat()))
+        conn.commit()
+
+        return True, f"Willkommen in der Gruppe '{group['name']}'!"
+
+
+def db_get_user_groups(user_id: int) -> List[Dict]:
+    """Holt alle Gruppen eines Benutzers."""
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        c.execute("""
+            SELECT g.*, gm.role, gm.weekly_xp, gm.total_group_xp
+            FROM learning_groups g
+            JOIN group_members gm ON g.id = gm.group_id
+            WHERE gm.user_id=?
+            ORDER BY g.created_at DESC
+        """, (user_id,))
+        return [dict(row) for row in c.fetchall()]
+
+
+def db_get_group_members(group_id: int) -> List[Dict]:
+    """Holt alle Mitglieder einer Gruppe mit Statistiken."""
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        c.execute("""
+            SELECT gm.*, us.total_xp, us.level, us.current_streak
+            FROM group_members gm
+            LEFT JOIN user_stats us ON gm.user_id = us.user_id
+            WHERE gm.group_id=?
+            ORDER BY gm.weekly_xp DESC
+        """, (group_id,))
+        return [dict(row) for row in c.fetchall()]
+
+
+def db_get_group_leaderboard(group_id: int, week_start: str = None) -> List[Dict]:
+    """Holt das Wochen-Leaderboard einer Gruppe."""
+    if not week_start:
+        # Aktuelle Woche (Montag)
+        today = dt.date.today()
+        week_start = (today - dt.timedelta(days=today.weekday())).isoformat()
+
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        c.execute("""
+            SELECT * FROM group_leaderboard
+            WHERE group_id=? AND week_start=?
+            ORDER BY xp_earned DESC
+        """, (group_id, week_start))
+        return [dict(row) for row in c.fetchall()]
+
+
+def db_update_group_leaderboard(group_id: int, user_id: int, username: str, xp_earned: int = 0, cards_learned: int = 0):
+    """Aktualisiert den Leaderboard-Eintrag eines Benutzers."""
+    today = dt.date.today()
+    week_start = (today - dt.timedelta(days=today.weekday())).isoformat()
+
+    with get_db_connection() as conn:
+        c = conn.cursor()
+
+        # Versuche Update
+        c.execute("""
+            UPDATE group_leaderboard
+            SET xp_earned = xp_earned + ?, cards_learned = cards_learned + ?
+            WHERE group_id=? AND user_id=? AND week_start=?
+        """, (xp_earned, cards_learned, group_id, user_id, week_start))
+
+        if c.rowcount == 0:
+            # Neuer Eintrag
+            c.execute("""
+                INSERT INTO group_leaderboard (group_id, user_id, username, week_start, xp_earned, cards_learned)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (group_id, user_id, username, week_start, xp_earned, cards_learned))
+
+        # Auch weekly_xp in group_members aktualisieren
+        c.execute("""
+            UPDATE group_members
+            SET weekly_xp = weekly_xp + ?, total_group_xp = total_group_xp + ?
+            WHERE group_id=? AND user_id=?
+        """, (xp_earned, xp_earned, group_id, user_id))
+
+        conn.commit()
+
+
+def db_create_duel(challenger_id: int, opponent_id: int, deck_id: int = None) -> int:
+    """Erstellt ein neues Duell."""
+    with get_db_connection() as conn:
+        c = conn.cursor()
+
+        # Fragen fuer das Duell vorbereiten
+        if deck_id:
+            c.execute("SELECT * FROM cards WHERE deck_id=? ORDER BY RANDOM() LIMIT ?",
+                     (deck_id, DUEL_SETTINGS["questions_per_round"]))
+        else:
+            c.execute("SELECT * FROM cards WHERE user_id IN (?, ?) ORDER BY RANDOM() LIMIT ?",
+                     (challenger_id, opponent_id, DUEL_SETTINGS["questions_per_round"]))
+
+        questions = [dict(row) for row in c.fetchall()]
+        questions_json = json.dumps([{
+            "id": q["id"],
+            "question": q["question"],
+            "answer": q["answer"],
+            "choices": json.loads(q["choices_json"]) if q["choices_json"] else None,
+            "correct_choice_index": q["correct_choice_index"]
+        } for q in questions])
+
+        c.execute("""
+            INSERT INTO duels (challenger_id, opponent_id, deck_id, created_at, questions_json)
+            VALUES (?, ?, ?, ?, ?)
+        """, (challenger_id, opponent_id, deck_id, dt.datetime.now().isoformat(), questions_json))
+
+        conn.commit()
+        return c.lastrowid
+
+
+def db_get_active_duels(user_id: int) -> List[Dict]:
+    """Holt aktive Duelle eines Benutzers."""
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        c.execute("""
+            SELECT d.*,
+                   p1.username as challenger_name,
+                   p2.username as opponent_name
+            FROM duels d
+            LEFT JOIN user_profiles p1 ON d.challenger_id = p1.user_id
+            LEFT JOIN user_profiles p2 ON d.opponent_id = p2.user_id
+            WHERE (d.challenger_id=? OR d.opponent_id=?)
+              AND d.status IN ('pending', 'active')
+            ORDER BY d.created_at DESC
+        """, (user_id, user_id))
+        return [dict(row) for row in c.fetchall()]
+
+
+def db_update_duel_score(duel_id: int, user_id: int, correct: bool):
+    """Aktualisiert den Duell-Punktestand."""
+    with get_db_connection() as conn:
+        c = conn.cursor()
+
+        # Ermittle ob Challenger oder Opponent
+        c.execute("SELECT * FROM duels WHERE id=?", (duel_id,))
+        duel = c.fetchone()
+
+        if not duel:
+            return
+
+        if user_id == duel["challenger_id"]:
+            score_field = "challenger_score"
+        else:
+            score_field = "opponent_score"
+
+        if correct:
+            c.execute(f"UPDATE duels SET {score_field} = {score_field} + 1 WHERE id=?", (duel_id,))
+
+        c.execute("UPDATE duels SET current_question = current_question + 1 WHERE id=?", (duel_id,))
+        conn.commit()
+
+
+def db_complete_duel(duel_id: int) -> Dict:
+    """Beendet ein Duell und ermittelt den Gewinner."""
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        c.execute("SELECT * FROM duels WHERE id=?", (duel_id,))
+        duel = dict(c.fetchone())
+
+        winner_id = None
+        if duel["challenger_score"] > duel["opponent_score"]:
+            winner_id = duel["challenger_id"]
+        elif duel["opponent_score"] > duel["challenger_score"]:
+            winner_id = duel["opponent_id"]
+        # Bei Gleichstand: kein Gewinner
+
+        c.execute("UPDATE duels SET status='completed', winner_id=? WHERE id=?", (winner_id, duel_id))
+
+        # Statistiken aktualisieren
+        c.execute("UPDATE user_profiles SET duels_played = duels_played + 1 WHERE user_id IN (?, ?)",
+                 (duel["challenger_id"], duel["opponent_id"]))
+
+        if winner_id:
+            c.execute("UPDATE user_profiles SET duels_won = duels_won + 1 WHERE user_id=?", (winner_id,))
+
+        conn.commit()
+
+        return {**duel, "winner_id": winner_id}
+
+
+def db_create_challenge(user_id: int, challenge_type: str, target: int, days: int = 1, group_id: int = None) -> int:
+    """Erstellt eine neue Challenge."""
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        start_date = dt.date.today()
+        end_date = start_date + dt.timedelta(days=days)
+        xp_reward = CHALLENGE_TYPES.get(challenge_type, {}).get("xp", 50)
+
+        c.execute("""
+            INSERT INTO challenges (user_id, group_id, challenge_type, target_value, start_date, end_date, xp_reward)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (user_id, group_id, challenge_type, target, start_date.isoformat(), end_date.isoformat(), xp_reward))
+        conn.commit()
+        return c.lastrowid
+
+
+def db_get_active_challenges(user_id: int) -> List[Dict]:
+    """Holt aktive Challenges eines Benutzers."""
+    today = dt.date.today().isoformat()
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        c.execute("""
+            SELECT * FROM challenges
+            WHERE (user_id=? OR group_id IN (SELECT group_id FROM group_members WHERE user_id=?))
+              AND end_date >= ?
+              AND is_completed = 0
+            ORDER BY end_date ASC
+        """, (user_id, user_id, today))
+        return [dict(row) for row in c.fetchall()]
+
+
+def db_update_challenge_progress(user_id: int, challenge_type: str, increment: int = 1):
+    """Aktualisiert den Fortschritt einer Challenge."""
+    today = dt.date.today().isoformat()
+    with get_db_connection() as conn:
+        c = conn.cursor()
+
+        # Finde passende aktive Challenges
+        c.execute("""
+            SELECT * FROM challenges
+            WHERE user_id=? AND challenge_type=? AND end_date >= ? AND is_completed = 0
+        """, (user_id, challenge_type, today))
+
+        for challenge in c.fetchall():
+            new_value = challenge["current_value"] + increment
+
+            if new_value >= challenge["target_value"]:
+                # Challenge abgeschlossen!
+                c.execute("""
+                    UPDATE challenges SET current_value=?, is_completed=1 WHERE id=?
+                """, (new_value, challenge["id"]))
+            else:
+                c.execute("""
+                    UPDATE challenges SET current_value=? WHERE id=?
+                """, (new_value, challenge["id"]))
+
+        conn.commit()
+
+
+# ============================================================
+# 3. Session-State Initialisierung (User & KI)
+# ============================================================
+
+def init_state():
+    if "user_id" not in st.session_state:
+        st.session_state.user_id = 1  # Dummy-User
+    if "study_plan" not in st.session_state:
+        st.session_state.study_plan = None
+
+
+def init_llm_state():
+    if "llm_provider" not in st.session_state:
+        st.session_state.llm_provider = "openai"  # "openai" oder "anthropic"
+    if "openai_api_key" not in st.session_state:
+        # Aus .env vorbelegen, kann im UI überschrieben werden
+        st.session_state.openai_api_key = os.getenv("OPENAI_API_KEY", "")
+    if "anthropic_api_key" not in st.session_state:
+        st.session_state.anthropic_api_key = os.getenv("ANTHROPIC_API_KEY", "")
+    if "llm_connection_status" not in st.session_state:
+        st.session_state.llm_connection_status = None
+    if "current_cards" not in st.session_state:
+        st.session_state.current_cards: List[Card] = []
+    if "current_card_index" not in st.session_state:
+        st.session_state.current_card_index = 0
+    if "current_exam" not in st.session_state:
+        st.session_state.current_exam = None
+    if "study_answer_mode" not in st.session_state:
+        st.session_state.study_answer_mode = "Freitext"  # "Freitext" oder "Multiple Choice"
+
+
+def init_gamification_state():
+    """Initialisiert Gamification-bezogene Session States."""
+    if "user_stats" not in st.session_state:
+        st.session_state.user_stats = None
+    if "session_xp_earned" not in st.session_state:
+        st.session_state.session_xp_earned = 0
+    if "session_cards_correct" not in st.session_state:
+        st.session_state.session_cards_correct = 0
+    if "session_cards_wrong" not in st.session_state:
+        st.session_state.session_cards_wrong = 0
+    if "new_achievements" not in st.session_state:
+        st.session_state.new_achievements = []
+
+
+def init_pomodoro_state():
+    """Initialisiert Pomodoro-Timer Session States."""
+    if "pomodoro_running" not in st.session_state:
+        st.session_state.pomodoro_running = False
+    if "pomodoro_start_time" not in st.session_state:
+        st.session_state.pomodoro_start_time = None
+    if "pomodoro_duration" not in st.session_state:
+        st.session_state.pomodoro_duration = 25  # Minuten
+    if "pomodoro_break" not in st.session_state:
+        st.session_state.pomodoro_break = False
+    if "pomodoro_sessions_completed" not in st.session_state:
+        st.session_state.pomodoro_sessions_completed = 0
+
+
+def init_tutor_state():
+    """Initialisiert KI-Tutor Session States."""
+    if "tutor_messages" not in st.session_state:
+        st.session_state.tutor_messages = []
+    if "tutor_topic" not in st.session_state:
+        st.session_state.tutor_topic = None
+
+
+def init_multiplayer_state():
+    """Initialisiert Multiplayer Session States.
+
+    HINWEIS für Backend-Migration:
+    - In einer Multiplayer-Umgebung sollten viele dieser Daten
+      serverseitig in Echtzeit synchronisiert werden (z.B. via Supabase Realtime)
+    - Duelle und Challenges benötigen Server-side Validierung
+    """
+    if "current_group_id" not in st.session_state:
+        st.session_state.current_group_id = None
+    if "active_duel" not in st.session_state:
+        st.session_state.active_duel = None
+    if "duel_answers" not in st.session_state:
+        st.session_state.duel_answers = []
+    if "duel_start_time" not in st.session_state:
+        st.session_state.duel_start_time = None
+    if "multiplayer_username" not in st.session_state:
+        # HINWEIS: In Produktion sollte dies über Auth (z.B. Supabase Auth) laufen
+        st.session_state.multiplayer_username = f"Spieler_{st.session_state.user_id}"
+    if "user_profile" not in st.session_state:
+        st.session_state.user_profile = None
+
+
+init_db_schema()
+init_state()
+init_llm_state()
+init_gamification_state()
+init_pomodoro_state()
+init_tutor_state()
+init_multiplayer_state()
+
+# Study-Plan aus DB holen (oder anlegen)
+st.session_state.study_plan = get_or_create_study_plan(st.session_state.user_id)
+# User-Stats für Gamification laden
+st.session_state.user_stats = get_or_create_user_stats(st.session_state.user_id)
+
+
+# ============================================================
+# 4. KI-Client & Verbindungstest
+# ============================================================
+
+def get_llm_client():
+    provider = st.session_state.llm_provider
+
+    if provider == "openai":
+        api_key = st.session_state.openai_api_key.strip()
+        if not api_key:
+            raise ValueError("Kein OpenAI-API-Key hinterlegt.")
+        client = OpenAI(api_key=api_key)
+        return client, "openai"
+
+    elif provider == "anthropic":
+        api_key = st.session_state.anthropic_api_key.strip()
+        if not api_key:
+            raise ValueError("Kein Anthropic-API-Key hinterlegt.")
+        client = Anthropic(api_key=api_key)
+        return client, "anthropic"
+
+    else:
+        raise ValueError(f"Unbekannter Provider: {provider}")
+
+
+def test_llm_connection():
+    """
+    Mini-Anfrage an den gewählten Provider, setzt llm_connection_status.
+    """
+    try:
+        client, provider = get_llm_client()
+
+        if provider == "openai":
+            resp = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "Du bist ein Kurzbefehlstester."},
+                    {"role": "user", "content": "Antworte nur mit: OK"}
+                ],
+                max_tokens=5,
+            )
+            text = resp.choices[0].message.content.strip()
+        else:
+            resp = client.messages.create(
+                model="claude-3-5-sonnet-20240620",
+                max_tokens=16,
+                messages=[
+                    {"role": "user", "content": "Antworte nur mit: OK"}
+                ],
+            )
+            text = resp.content[0].text.strip()
+
+        if "OK" in text.upper():
+            st.session_state.llm_connection_status = "ok"
+            st.success(f"✅ KI-Verbindung ({provider}) erfolgreich hergestellt.")
+        else:
+            st.session_state.llm_connection_status = "Antwort unerwartet"
+            st.warning("Verbindung hergestellt, aber Antwort unerwartet. Prüfe Modell/Prompt.")
+
+    except Exception as e:
+        st.session_state.llm_connection_status = str(e)
+        st.error(f"❌ Fehler bei der KI-Verbindung: {e}")
+
+
+class LLMError(Exception):
+    """Custom exception for LLM API errors with user-friendly messages."""
+    pass
+
+
+def call_llm(system_prompt: str, user_prompt: str, max_tokens: int = 4096) -> str:
+    """
+    Zentrale Stelle für alle LLM-Aufrufe mit umfassendem Error-Handling.
+
+    Args:
+        system_prompt: System-Anweisung für die KI
+        user_prompt: Benutzer-Anfrage
+        max_tokens: Maximale Anzahl Tokens in der Antwort (Standard: 4096)
+    """
+    try:
+        client, provider = get_llm_client()
+    except ValueError as e:
+        raise LLMError(f"Konfigurationsfehler: {e}")
+
+    try:
+        if provider == "openai":
+            resp = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.3,
+                max_tokens=max_tokens,
+            )
+            return resp.choices[0].message.content
+
+        else:  # anthropic
+            resp = client.messages.create(
+                model="claude-3-5-sonnet-20240620",
+                max_tokens=max_tokens,
+                temperature=0.3,
+                system=system_prompt,
+                messages=[
+                    {"role": "user", "content": user_prompt},
+                ],
+            )
+            return resp.content[0].text
+
+    except OpenAIRateLimitError as e:
+        error_msg = str(e).lower()
+        if "insufficient_quota" in error_msg or "quota" in error_msg:
+            raise LLMError(
+                "OpenAI Kontingent erschöpft.\n\n"
+                "Lösung: Guthaben prüfen unter https://platform.openai.com/usage"
+            )
+        else:
+            raise LLMError(
+                "OpenAI Rate-Limit erreicht (zu viele Anfragen pro Minute).\n\n"
+                "Lösung: Bitte warte 30-60 Sekunden und versuche es erneut."
+            )
+    except OpenAIAPIError as e:
+        error_msg = str(e).lower()
+        if "context_length" in error_msg or "maximum context" in error_msg or "too long" in error_msg:
+            raise LLMError(
+                "Der Text ist zu lang für das KI-Modell.\n\n"
+                "Lösung: Bitte lade ein kleineres Dokument hoch oder teile es auf."
+            )
+        elif "invalid_api_key" in error_msg or "authentication" in error_msg:
+            raise LLMError(
+                "Ungültiger OpenAI API-Key.\n\n"
+                "Lösung: Prüfe den API-Key in den Einstellungen."
+            )
+        else:
+            raise LLMError(f"OpenAI API-Fehler: {e}")
+    except AnthropicRateLimitError as e:
+        error_msg = str(e).lower()
+        if "credit" in error_msg or "billing" in error_msg:
+            raise LLMError(
+                "Anthropic Kontingent erschöpft.\n\n"
+                "Lösung: Guthaben prüfen unter https://console.anthropic.com/"
+            )
+        else:
+            raise LLMError(
+                "Anthropic Rate-Limit erreicht (zu viele Anfragen pro Minute).\n\n"
+                "Lösung: Bitte warte 30-60 Sekunden und versuche es erneut."
+            )
+    except AnthropicAPIError as e:
+        error_msg = str(e).lower()
+        if "too long" in error_msg or "token" in error_msg and "limit" in error_msg:
+            raise LLMError(
+                "Der Text ist zu lang für das KI-Modell.\n\n"
+                "Lösung: Bitte lade ein kleineres Dokument hoch oder teile es auf."
+            )
+        elif "invalid" in error_msg and "key" in error_msg:
+            raise LLMError(
+                "Ungültiger Anthropic API-Key.\n\n"
+                "Lösung: Prüfe den API-Key in den Einstellungen."
+            )
+        else:
+            raise LLMError(f"Anthropic API-Fehler: {e}")
+    except Exception as e:
+        raise LLMError(f"Unerwarteter Fehler bei der KI-Anfrage: {e}")
+
+
+# ============================================================
+# 5. Prompt-Konstanten (System- & User-Prompts)
+# ============================================================
+
+FLASHCARD_SYSTEM_PROMPT = """
+Du bist ein hochspezialisierter KI-Tutor, der aus Fachtexten didaktisch hochwertige Karteikarten erzeugt.
+
+Ziele:
+- Erzeuge präzise, prüfungsrelevante Lernkarten.
+- Formuliere kurz, klar und fachlich korrekt.
+- Baue Verständnisfragen ein, nicht nur reine Wissensabfragen.
+- Nutze konsequent die Terminologie des jeweiligen Fachgebiets.
+
+Format:
+- Du antwortest ausschließlich mit einem JSON-Array.
+- Jedes Element ist ein Objekt mit den Schlüsseln:
+  * "question": Die Frage (String)
+  * "answer": Die korrekte Antwort (String)
+  * "explanation": Erklärung/Kontext (String)
+  * "choices": Array mit 4 vollständigen Antworttexten ODER null
+  * "correct_choice_index": Index 0-3 der richtigen Antwort ODER null
+
+KRITISCH für Multiple-Choice:
+- "choices" muss ein Array mit 4 VOLLSTÄNDIGEN ANTWORTTEXTEN sein
+- NIEMALS nur Buchstaben wie ["A", "B", "C", "D"] verwenden!
+- Beispiel korrekt: ["Der Bundestag", "Der Bundesrat", "Die Regierung", "Das Gericht"]
+- Beispiel FALSCH: ["A", "B", "C", "D"] oder ["A.", "B.", "C.", "D."]
+
+Kein anderer Text außerhalb des JSON-Arrays.
+""".strip()
+
+JURA_FLASHCARD_USER_PROMPT = """
+FACH: Rechtswissenschaften
+SCHWERPUNKT: {topic}
+NIVEAU: {difficulty}
+
+{format_instruction}
+
+AUFGABE:
+Erzeuge aus dem folgenden juristischen Fachtext hochwertige Karteikarten für Jurastudierende.
+
+TEXT:
+{text}
+
+Didaktische Anforderungen:
+- Definitionen, Schemata, Mini-Fälle, Abgrenzungen und Klausurtaktik mischen.
+- Schwierigkeitsgrad an {difficulty} anpassen.
+- Bei Multiple-Choice: Plausible Distraktoren, die typische Fehler abbilden.
+
+Rückgabe:
+Nur das JSON-Array der Karten gemäß System-Anweisung.
+""".strip()
+
+MED_FLASHCARD_USER_PROMPT = """
+FACH: Medizin
+SCHWERPUNKT: {topic}
+NIVEAU: {difficulty}
+
+{format_instruction}
+
+AUFGABE:
+Erzeuge aus dem folgenden medizinischen Fachtext hochwertige Karteikarten für Medizinstudierende.
+
+TEXT:
+{text}
+
+Didaktische Anforderungen:
+- Leitsymptome, Pathophysiologie, Diagnostik, TherapiePRINZIPIEN und Komplikationen.
+- Keine Dosierungen oder individuellen Therapiepläne.
+- Bei Multiple-Choice: Klinisch relevante Distraktoren (DD, ähnliche Erkrankungen).
+
+Rückgabe:
+Nur das JSON-Array der Karten gemäß System-Anweisung.
+""".strip()
+
+GENERIC_FLASHCARD_USER_PROMPT = """
+FACH: {subject}
+SCHWERPUNKT / THEMA: {topic}
+NIVEAU: {difficulty}
+
+{format_instruction}
+
+AUFGABE:
+Erzeuge aus dem folgenden Fachtext hochwertige Karteikarten für Studierende.
+
+TEXT:
+{text}
+
+Didaktische Anforderungen:
+- Zentrale Begriffe, Konzepte, Algorithmen, Formeln, Anwendungsfälle.
+- Mischung aus Definitions-, Konzept-, Anwendungs- und Vergleichskarten.
+- Schwierigkeitsgrad an {difficulty} anpassen.
+- Bei Multiple-Choice: Plausible Distraktoren aus dem Fachgebiet.
+
+Rückgabe:
+Nur das JSON-Array der Karten gemäß System-Anweisung.
+""".strip()
+
+SYSTEM_JURA_EVAL = """
+Du bist ein erfahrener juristischer Korrektor.
+
+Aufgabe:
+- Bewerte die Freitextantwort eines Studierenden auf eine Lernkarte als "correct", "partial" oder "wrong".
+
+Ausgabe:
+- JSON-Objekt mit "grade" und "explanation".
+""".strip()
+
+USER_JURA_EVAL = """
+FACH: Rechtswissenschaften
+THEMA: {topic}
+
+FRAGE:
+{card_question}
+
+MUSTERLÖSUNG:
+{card_answer}
+
+ERWEITERTE ERKLÄRUNG:
+{card_explanation}
+
+ANTWORT DES STUDIERENDEN:
+{user_answer}
+
+Bitte:
+- Ordne in "correct", "partial" oder "wrong" ein.
+- Erkläre kurz warum.
+- Gib in der Erklärung eine knappe Musterlösung.
+
+Rückgabe:
+Nur JSON mit "grade" und "explanation".
+""".strip()
+
+SYSTEM_MED_EVAL = """
+Du bist ein erfahrener medizinischer Prüfer.
+
+Aufgabe:
+- Bewerte eine Freitextantwort eines Medizinstudierenden als "correct", "partial" oder "wrong".
+
+Ausgabe:
+- JSON-Objekt mit "grade" und "explanation".
+""".strip()
+
+USER_MED_EVAL = """
+FACH: Medizin
+THEMA: {topic}
+
+FRAGE:
+{card_question}
+
+MUSTERLÖSUNG:
+{card_answer}
+
+ERWEITERTE ERKLÄRUNG:
+{card_explanation}
+
+ANTWORT DES STUDIERENDEN:
+{user_answer}
+
+Bitte:
+- Ordne in "correct", "partial" oder "wrong" ein.
+- Erkläre kurz warum.
+- Fasse die korrekte Kernaussage knapp zusammen.
+
+Rückgabe:
+Nur JSON mit "grade" und "explanation".
+""".strip()
+
+SYSTEM_GENERIC_EVAL = """
+Du bist ein fachkundiger Prüfer und bewertest Freitextantworten.
+
+Ausgabe:
+- JSON-Objekt mit "grade" ("correct", "partial", "wrong") und "explanation".
+""".strip()
+
+USER_GENERIC_EVAL = """
+FACH: {subject}
+THEMA: {topic}
+
+FRAGE:
+{card_question}
+
+MUSTERLÖSUNG:
+{card_answer}
+
+ERWEITERTE ERKLÄRUNG:
+{card_explanation}
+
+ANTWORT DES STUDIERENDEN:
+{user_answer}
+
+Bitte:
+- Bewerte die Antwort als "correct", "partial" oder "wrong".
+- Begründe kurz.
+- Gib eine kurze Musterlösung in der Erklärung.
+
+Rückgabe:
+Nur JSON mit "grade" und "explanation".
+""".strip()
+
+SYSTEM_JURA_EXAM = """
+Du bist Prüfer im Fach Rechtswissenschaften und erstellst realistische fallbasierte Prüfungssimulationen.
+
+Format:
+- JSON-Objekt mit "questions": Liste von Fragenobjekten mit "prompt", "sub_prompts", "difficulty", "estimated_time_minutes".
+- Keine Lösungen ausgeben.
+""".strip()
+
+USER_JURA_EXAM = """
+FACH: Rechtswissenschaften
+SCHWERPUNKT: {topic}
+NIVEAU: {level}
+DAUER: {duration_minutes} Minuten
+MODUS: {mode}
+
+Erzeuge eine juristische Prüfungssimulation mit mindestens einem Fall und mehreren Teilfragen (sub_prompts).
+
+Rückgabe:
+Nur JSON mit "questions".
+""".strip()
+
+SYSTEM_MED_EXAM = """
+Du bist Prüfer im Fach Medizin und erstellst klinische Prüfungssimulationen.
+
+Format:
+- JSON-Objekt mit "questions": Liste von Fragenobjekten mit "prompt", "sub_prompts", "difficulty", "estimated_time_minutes".
+- Keine Lösungen.
+""".strip()
+
+USER_MED_EXAM = """
+FACH: Medizin
+SCHWERPUNKT: {topic}
+NIVEAU: {level}
+DAUER: {duration_minutes} Minuten
+MODUS: {mode}
+
+Erzeuge eine klinische Prüfungssimulation (Fallvignetten + Teilfragen).
+
+Rückgabe:
+Nur JSON mit "questions".
+""".strip()
+
+SYSTEM_GENERIC_EXAM = """
+Du bist Prüfer und erstellst realistische Klausuraufgaben zu einem Fachthema.
+
+Ausgabe:
+- JSON mit "questions": Liste von Aufgaben.
+""".strip()
+
+USER_GENERIC_EXAM = """
+FACH: {subject}
+SCHWERPUNKT: {topic}
+NIVEAU: {level}
+DAUER: {duration_minutes} Minuten
+MODUS: {mode}
+
+Erzeuge eine Prüfungssimulation mit mehreren Aufgaben und Teilfragen.
+
+Rückgabe:
+Nur JSON mit "questions".
+""".strip()
+
+
+# ============================================================
+# 6. KI-Funktionen (Karten, Bewertung, Exam)
+# ============================================================
+
+def extract_json_from_response(raw: str) -> Any:
+    """
+    Extrahiert JSON aus einer KI-Antwort, auch wenn diese in Markdown
+    Code-Bloecken oder mit zusaetzlichem Text umgeben ist.
+    """
+    if not raw or not raw.strip():
+        raise ValueError("Leere Antwort von der KI erhalten.")
+
+    text = raw.strip()
+
+    # Versuch 1: Direktes Parsen
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # Versuch 2: JSON aus Markdown Code-Block extrahieren (```json ... ```)
+    code_block_match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', text)
+    if code_block_match:
+        try:
+            return json.loads(code_block_match.group(1))
+        except json.JSONDecodeError:
+            pass
+
+    # Versuch 3: JSON-Array finden ([...])
+    array_match = re.search(r'\[[\s\S]*\]', text)
+    if array_match:
+        try:
+            return json.loads(array_match.group(0))
+        except json.JSONDecodeError:
+            pass
+
+    # Versuch 4: JSON-Objekt finden ({...})
+    obj_match = re.search(r'\{[\s\S]*\}', text)
+    if obj_match:
+        try:
+            return json.loads(obj_match.group(0))
+        except json.JSONDecodeError:
+            pass
+
+    raise ValueError(f"Kein gueltiges JSON in der Antwort gefunden. Antwort beginnt mit: {text[:100]}...")
+
+
+def llm_generate_flashcards(
+    text: str,
+    subject: str,
+    topic: str,
+    difficulty: str,
+    num_cards: int = 20,
+    card_format: str = "Gemischt (empfohlen)"
+) -> List[Dict[str, Any]]:
+    """Generiert Karteikarten mit der KI.
+
+    Args:
+        text: Der Quelltext aus dem Karten generiert werden
+        subject: Fachgebiet (Rechtswissenschaften, Medizin, etc.)
+        topic: Thema/Kapitel
+        difficulty: Schwierigkeitsgrad
+        num_cards: Zielanzahl der zu generierenden Karten
+        card_format: "Gemischt (empfohlen)", "Nur Multiple-Choice", oder "Nur Freitext"
+    """
+    # Format-Anweisung basierend auf Auswahl
+    if card_format == "Nur Multiple-Choice":
+        format_instruction = f"""
+WICHTIG - KARTENFORMAT:
+- Erzeuge GENAU {num_cards} Karteikarten.
+- ALLE Karten MÜSSEN Multiple-Choice sein.
+- Jede Karte hat genau 4 vollständige Antwortoptionen als Array.
+- "correct_choice_index" gibt den Index (0-3) der richtigen Antwort an.
+
+BEISPIEL für eine Multiple-Choice-Karte:
+{{
+  "question": "Was ist die Hauptstadt von Deutschland?",
+  "answer": "Berlin",
+  "explanation": "Berlin ist seit 1990 die Hauptstadt des vereinten Deutschlands.",
+  "choices": ["Berlin", "München", "Hamburg", "Frankfurt"],
+  "correct_choice_index": 0
+}}
+
+WICHTIG: Die choices müssen vollständige Antworttexte sein, NICHT nur Buchstaben!
+"""
+    elif card_format == "Nur Freitext":
+        format_instruction = f"""
+WICHTIG - KARTENFORMAT:
+- Erzeuge GENAU {num_cards} Karteikarten.
+- ALLE Karten sind Freitext-Karten (KEINE Multiple-Choice).
+- Setze "choices": null und "correct_choice_index": null.
+
+BEISPIEL für eine Freitext-Karte:
+{{
+  "question": "Erkläre das Prinzip der Gewaltenteilung.",
+  "answer": "Die Gewaltenteilung teilt die Staatsgewalt in Legislative, Exekutive und Judikative.",
+  "explanation": "Dieses Prinzip verhindert Machtmissbrauch durch gegenseitige Kontrolle.",
+  "choices": null,
+  "correct_choice_index": null
+}}
+"""
+    else:  # Gemischt
+        format_instruction = f"""
+WICHTIG - KARTENFORMAT:
+- Erzeuge GENAU {num_cards} Karteikarten.
+- Mische Multiple-Choice und Freitext-Karten (ca. 50/50).
+
+BEISPIEL Multiple-Choice:
+{{
+  "question": "Welches Organ erlässt Bundesgesetze?",
+  "answer": "Der Bundestag",
+  "explanation": "Der Bundestag ist das gesetzgebende Organ auf Bundesebene.",
+  "choices": ["Der Bundestag", "Der Bundesrat", "Die Bundesregierung", "Das Bundesverfassungsgericht"],
+  "correct_choice_index": 0
+}}
+
+BEISPIEL Freitext:
+{{
+  "question": "Erkläre den Unterschied zwischen Vorsatz und Fahrlässigkeit.",
+  "answer": "Vorsatz ist wissentliches und willentliches Handeln, Fahrlässigkeit ist Außerachtlassung der Sorgfalt.",
+  "explanation": "Der Unterschied liegt im subjektiven Tatbestand.",
+  "choices": null,
+  "correct_choice_index": null
+}}
+
+WICHTIG: Bei Multiple-Choice müssen die choices vollständige Antworttexte sein, NICHT nur "A", "B", "C", "D"!
+"""
+
+    if subject == "Rechtswissenschaften":
+        user_prompt = JURA_FLASHCARD_USER_PROMPT.format(
+            topic=topic,
+            difficulty=difficulty,
+            text=text,
+            format_instruction=format_instruction,
+        )
+    elif subject == "Medizin":
+        user_prompt = MED_FLASHCARD_USER_PROMPT.format(
+            topic=topic,
+            difficulty=difficulty,
+            text=text,
+            format_instruction=format_instruction,
+        )
+    else:
+        user_prompt = GENERIC_FLASHCARD_USER_PROMPT.format(
+            subject=subject,
+            topic=topic,
+            difficulty=difficulty,
+            text=text,
+            format_instruction=format_instruction,
+        )
+
+    try:
+        raw = call_llm(FLASHCARD_SYSTEM_PROMPT, user_prompt, max_tokens=8192)
+    except LLMError as e:
+        st.error(f"KI-Fehler: {e}")
+        return []
+
+    try:
+        cards = extract_json_from_response(raw)
+        if not isinstance(cards, list):
+            raise ValueError("Antwort ist kein JSON-Array.")
+        return cards
+    except ValueError as e:
+        st.error(f"Fehler beim Parsen der Karten-Antwort: {e}")
+        if raw:
+            with st.expander("Rohantwort der KI anzeigen"):
+                st.code(raw)
+        return []
+
+
+def llm_evaluate_free_text_answer(user_answer: str, card: Card) -> Dict[str, Any]:
+    subject = card.subject or "Allgemein"
+    topic = ", ".join(card.tags) if card.tags else card.subject
+
+    if subject == "Rechtswissenschaften":
+        system_prompt = SYSTEM_JURA_EVAL
+        user_prompt = USER_JURA_EVAL.format(
+            topic=topic,
+            card_question=card.question,
+            card_answer=card.answer,
+            card_explanation=card.explanation,
+            user_answer=user_answer,
+        )
+    elif subject == "Medizin":
+        system_prompt = SYSTEM_MED_EVAL
+        user_prompt = USER_MED_EVAL.format(
+            topic=topic,
+            card_question=card.question,
+            card_answer=card.answer,
+            card_explanation=card.explanation,
+            user_answer=user_answer,
+        )
+    else:
+        system_prompt = SYSTEM_GENERIC_EVAL
+        user_prompt = USER_GENERIC_EVAL.format(
+            subject=subject,
+            topic=topic,
+            card_question=card.question,
+            card_answer=card.answer,
+            card_explanation=card.explanation,
+            user_answer=user_answer,
+        )
+
+    try:
+        raw = call_llm(system_prompt, user_prompt)
+    except LLMError as e:
+        st.error(f"KI-Fehler: {e}")
+        return {
+            "grade": "partial",
+            "explanation": "KI-Fehler bei der Auswertung. Antwort wird als 'teilweise richtig' behandelt."
+        }
+
+    try:
+        result = extract_json_from_response(raw)
+        if not isinstance(result, dict):
+            raise ValueError("Antwort ist kein JSON-Objekt.")
+        return result
+    except ValueError as e:
+        st.error(f"Fehler beim Parsen der Bewertungs-Antwort: {e}")
+        return {
+            "grade": "partial",
+            "explanation": "Fehler bei der KI-Auswertung. Antwort wird als 'teilweise richtig' behandelt."
+        }
+
+
+def llm_generate_exam(subject: str, topic: str, duration_minutes: int, level: str, mode: str) -> Dict[str, Any]:
+    if subject == "Rechtswissenschaften":
+        system_prompt = SYSTEM_JURA_EXAM
+        user_prompt = USER_JURA_EXAM.format(
+            topic=topic,
+            level=level,
+            duration_minutes=duration_minutes,
+            mode=mode,
+        )
+    elif subject == "Medizin":
+        system_prompt = SYSTEM_MED_EXAM
+        user_prompt = USER_MED_EXAM.format(
+            topic=topic,
+            level=level,
+            duration_minutes=duration_minutes,
+            mode=mode,
+        )
+    else:
+        system_prompt = SYSTEM_GENERIC_EXAM
+        user_prompt = USER_GENERIC_EXAM.format(
+            subject=subject,
+            topic=topic,
+            level=level,
+            duration_minutes=duration_minutes,
+            mode=mode,
+        )
+
+    try:
+        raw = call_llm(system_prompt, user_prompt)
+    except LLMError as e:
+        st.error(f"KI-Fehler: {e}")
+        return {"questions": []}
+
+    try:
+        data = extract_json_from_response(raw)
+        if not isinstance(data, dict) or "questions" not in data:
+            raise ValueError("Antwort enthaelt kein 'questions'-Feld.")
+        return data
+    except ValueError as e:
+        st.error(f"Fehler beim Parsen der Pruefungs-Antwort: {e}")
+        if raw:
+            with st.expander("Rohantwort der KI anzeigen"):
+                st.code(raw)
+        return {"questions": []}
+
+
+# ============================================================
+# 7. STT / TTS / Dateiextraktion
+# ============================================================
+
+def stt_transcribe_audio(file_bytes: bytes, filename: str = "audio.mp3") -> str:
+    """
+    Spracherkennung: Audio (Bytes) -> Text mit OpenAI Whisper.
+    """
+    try:
+        api_key = st.session_state.openai_api_key.strip()
+        if not api_key:
+            return "Fehler: Kein OpenAI-API-Key hinterlegt. Bitte unter KI-Einstellungen konfigurieren."
+
+        client = OpenAI(api_key=api_key)
+
+        # Erstelle ein file-like Objekt für die API
+        audio_file = BytesIO(file_bytes)
+        audio_file.name = filename
+
+        transcript = client.audio.transcriptions.create(
+            model="whisper-1",
+            file=audio_file,
+            language="de"
+        )
+        return transcript.text
+    except OpenAIRateLimitError:
+        return "Fehler: OpenAI Rate-Limit erreicht. Bitte später erneut versuchen."
+    except OpenAIAPIError as e:
+        return f"Fehler bei der Transkription: {e}"
+    except Exception as e:
+        return f"Unerwarteter Fehler bei der Transkription: {e}"
+
+
+def tts_generate_audio_from_text(text: str, voice: str = "alloy") -> bytes:
+    """
+    Text-to-Speech: Text -> Audio-Bytes (mp3) mit OpenAI TTS.
+    Verfügbare Stimmen: alloy, echo, fable, onyx, nova, shimmer
+    """
+    try:
+        api_key = st.session_state.openai_api_key.strip()
+        if not api_key:
+            st.error("Kein OpenAI-API-Key hinterlegt. Bitte unter KI-Einstellungen konfigurieren.")
+            return b""
+
+        client = OpenAI(api_key=api_key)
+
+        # OpenAI TTS hat ein Limit von 4096 Zeichen pro Anfrage
+        # Bei längeren Texten in Chunks aufteilen
+        max_chars = 4096
+        audio_chunks = []
+
+        # Text in Sätze aufteilen für natürliche Pausen
+        sentences = re.split(r'(?<=[.!?])\s+', text)
+        current_chunk = ""
+
+        for sentence in sentences:
+            if len(current_chunk) + len(sentence) < max_chars:
+                current_chunk += sentence + " "
+            else:
+                if current_chunk.strip():
+                    audio_chunks.append(current_chunk.strip())
+                current_chunk = sentence + " "
+
+        if current_chunk.strip():
+            audio_chunks.append(current_chunk.strip())
+
+        # Generiere Audio für jeden Chunk
+        all_audio = b""
+        for i, chunk in enumerate(audio_chunks):
+            if not chunk:
+                continue
+
+            response = client.audio.speech.create(
+                model="tts-1",
+                voice=voice,
+                input=chunk,
+                response_format="mp3"
+            )
+            all_audio += response.content
+
+            # Fortschrittsanzeige
+            if len(audio_chunks) > 1:
+                st.progress((i + 1) / len(audio_chunks), text=f"Generiere Audio: Teil {i+1}/{len(audio_chunks)}")
+
+        return all_audio
+
+    except OpenAIRateLimitError:
+        st.error("OpenAI Rate-Limit erreicht. Bitte später erneut versuchen.")
+        return b""
+    except OpenAIAPIError as e:
+        st.error(f"Fehler bei der Audio-Generierung: {e}")
+        return b""
+    except Exception as e:
+        st.error(f"Unerwarteter Fehler bei der Audio-Generierung: {e}")
+        return b""
+
+
+def extract_text_from_pdf(uploaded_file) -> str:
+    """
+    Liest ein PDF mit pdfplumber und gibt den extrahierten Text zurück.
+    """
+    text_chunks = []
+    with pdfplumber.open(BytesIO(uploaded_file.read())) as pdf:
+        for page in pdf.pages:
+            page_text = page.extract_text() or ""
+            text_chunks.append(page_text)
+    return "\n\n".join(text_chunks)
+
+
+def extract_text_from_docx(uploaded_file) -> str:
+    """
+    Liest ein DOCX-Dokument mit python-docx ein und gibt den Text zurück.
+    """
+    doc = Document(BytesIO(uploaded_file.read()))
+    paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
+    return "\n".join(paragraphs)
+
+
+def extract_text_from_image(uploaded_file) -> str:
+    """
+    Führt OCR auf einem hochgeladenen Bild durch (pytesseract).
+    Tesseract muss auf dem System installiert und im PATH sein.
+    """
+    img = Image.open(BytesIO(uploaded_file.read()))
+    text = pytesseract.image_to_string(img, lang="deu+eng")
+    return text
+
+
+def extract_text_from_uploaded_file(uploaded_file) -> str:
+    """
+    Delegiert je nach Dateityp an PDF/DOCX/TXT/Image-OCR.
+    Wird in der Upload-Seite verwendet.
+    """
+    filename = uploaded_file.name.lower()
+
+    if filename.endswith(".txt"):
+        try:
+            return uploaded_file.read().decode("utf-8", errors="ignore")
+        except Exception as e:
+            return f"Fehler beim Lesen der TXT-Datei: {e}"
+
+    if filename.endswith(".pdf"):
+        try:
+            return extract_text_from_pdf(uploaded_file)
+        except Exception as e:
+            return f"Fehler beim PDF-Auslesen: {e}"
+
+    if filename.endswith(".docx"):
+        try:
+            return extract_text_from_docx(uploaded_file)
+        except Exception as e:
+            return f"Fehler beim DOCX-Auslesen: {e}"
+
+    if any(filename.endswith(ext) for ext in [".png", ".jpg", ".jpeg"]):
+        try:
+            return extract_text_from_image(uploaded_file)
+        except Exception as e:
+            return f"Fehler bei Bild/OCR: {e}"
+
+    return "Dateiformat wird noch nicht unterstützt."
+
+
+# ============================================================
+# 8. Spaced-Repetition & Timeline
+# ============================================================
+
+BOX_INTERVALS = {1: 1, 2: 2, 3: 4, 4: 7, 5: 15}
+
+
+def update_card_after_result(card: Card, result: str):
+    today = dt.date.today()
+    card.last_reviewed = today
+
+    if result == "correct":
+        card.in_special_bucket = False
+        card.success_streak += 1
+        card.box = min(card.box + 1, max(BOX_INTERVALS.keys()))
+    else:
+        card.in_special_bucket = True
+        card.success_streak = 0
+        card.box = 1
+
+    interval_days = BOX_INTERVALS.get(card.box, 1)
+    card.due_date = today + dt.timedelta(days=interval_days)
+    db_update_card_spaced(card)
+
+
+def compute_timeline_status(plan: StudyPlan) -> Dict[str, Any]:
+    today = dt.date.today()
+    total_days = (plan.end_date - plan.start_date).days
+    if total_days <= 0:
+        total_days = 1
+
+    all_days_until_today = [
+        plan.start_date + dt.timedelta(days=i)
+        for i in range((today - plan.start_date).days + 1)
+        if plan.start_date + dt.timedelta(days=i) <= today
+    ]
+    free_days_until_today = [d for d in all_days_until_today if d in plan.free_days]
+    learning_days_until_today = len(all_days_until_today) - len(free_days_until_today)
+    learning_days_until_today = max(learning_days_until_today, 0)
+
+    expected_progress = learning_days_until_today / max(total_days - len(plan.free_days), 1)
+
+    cards = db_get_all_cards(plan.user_id)
+    total_cards = len(cards) or 1
+    reviewed_cards = [c for c in cards if c.last_reviewed is not None]
+    actual_progress = len(reviewed_cards) / total_cards
+
+    progress_diff = expected_progress - actual_progress
+    days_behind = progress_diff * total_days if progress_diff > 0 else 0
+
+    if days_behind == 0:
+        color = "green"
+    elif days_behind <= 2:
+        color = "orange"
+    else:
+        color = "red"
+
+    return {
+        "expected_progress": expected_progress,
+        "actual_progress": actual_progress,
+        "days_behind": days_behind,
+        "color": color,
     }
 
-    return base_menu + role_menus.get(role, [])
+
+def render_timeline(plan: StudyPlan):
+    status = compute_timeline_status(plan)
+    today = dt.date.today()
+    total_days = (plan.end_date - plan.start_date).days or 1
+    pos_today = (today - plan.start_date).days / total_days
+    pos_today = min(max(pos_today, 0), 1)
+
+    expected_pct = int(status["expected_progress"] * 100)
+    actual_pct = int(status["actual_progress"] * 100)
+    today_pct = int(pos_today * 100)
+    color = status["color"]
+
+    bar_html = f"""
+    <div style="position: relative; width: 100%; height: 20px; background-color: #eee; border-radius: 10px; margin-top: 10px;">
+      <div style="position:absolute; left:0; top:0; height:100%; width:{actual_pct}%; background-color: #4CAF50; border-radius: 10px;"></div>
+      <div style="position:absolute; left:{expected_pct}%; top:0; height:100%; width:2px; background-color: blue;"></div>
+      <div style="position:absolute; left:{today_pct}%; top:-6px; border-left: 6px solid transparent;
+                  border-right: 6px solid transparent; border-bottom: 6px solid {color};"></div>
+    </div>
+    <div style="font-size: 0.85em; margin-top: 4px;">
+      <b>Start:</b> {plan.start_date} &nbsp;&nbsp;
+      <b>Prüfung:</b> {plan.end_date} &nbsp;&nbsp;
+      <b>Status:</b> {color.upper()} (Rückstand≈ {status["days_behind"]:.1f} Tage)
+    </div>
+    """
+    st.markdown(bar_html, unsafe_allow_html=True)
 
 
-def render_page(page: str, role: str):
-    """Rendert die ausgewählte Seite."""
+# ============================================================
+# 9. Seiten
+# ============================================================
 
-    st.title(f"📊 {page}")
+def render_gamification_header():
+    """Rendert die Gamification-Leiste in der Sidebar."""
+    stats = st.session_state.user_stats
+    if not stats:
+        return
 
-    if page == "Dashboard":
-        render_dashboard(role)
-    elif page == "Projekte":
-        render_projects()
+    # XP und Level
+    current_xp, next_xp = get_xp_for_next_level(stats.total_xp)
+    xp_progress = (stats.total_xp - current_xp) / max(next_xp - current_xp, 1) * 100
+
+    st.sidebar.markdown("---")
+    st.sidebar.markdown(f"### 🎮 Level {stats.level}")
+
+    # XP-Fortschrittsbalken
+    st.sidebar.markdown(f"""
+    <div style="background:#e0e0e0;border-radius:10px;height:20px;margin:5px 0;">
+        <div class="xp-bar" style="width:{xp_progress:.0f}%;"></div>
+    </div>
+    <small>{stats.total_xp} / {next_xp} XP</small>
+    """, unsafe_allow_html=True)
+
+    # Streak
+    if stats.current_streak > 0:
+        st.sidebar.markdown(f'<div class="streak-badge">🔥 {stats.current_streak} Tage Streak</div>',
+                           unsafe_allow_html=True)
+
+
+def page_home():
+    st.title("📚 Smart Study Cards")
+
+    # Gamification Header
+    stats = st.session_state.user_stats
+    if stats:
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("🎮 Level", stats.level)
+        with col2:
+            st.metric("⭐ XP", f"{stats.total_xp:,}")
+        with col3:
+            st.metric("🔥 Streak", f"{stats.current_streak} Tage")
+        with col4:
+            st.metric("📚 Gelernt", stats.total_cards_learned)
+
+    st.write("""
+    Willkommen! Diese App erstellt mit Hilfe von KI interaktive Lernkarten, Lernpläne,
+    Hörbücher, Videos und Prüfungssimulationen für verschiedene Studiengänge
+    (z.B. Rechtswissenschaften, Medizin, Informatik, Physik).
+    """)
+
+    # Neue Achievements anzeigen
+    if st.session_state.new_achievements:
+        for ach_id in st.session_state.new_achievements:
+            ach = ACHIEVEMENTS[ach_id]
+            st.success(f"🏆 Neues Achievement: {ach['icon']} **{ach['name']}** - {ach['desc']} (+{ach['xp']} XP)")
+        st.session_state.new_achievements = []
+
+    st.subheader("Aktueller Lernplan – Timeline")
+    render_timeline(st.session_state.study_plan)
+
+    # Quick Stats
+    st.subheader("📊 Schnellübersicht")
+    col1, col2 = st.columns(2)
+
+    with col1:
+        # Heatmap der letzten 30 Tage
+        st.markdown("**Aktivität der letzten 30 Tage**")
+        heatmap_data = db_get_activity_heatmap(st.session_state.user_id, 30)
+        if heatmap_data:
+            # Einfache Visualisierung
+            today = dt.date.today()
+            html_cells = ""
+            for i in range(30, -1, -1):
+                day = today - dt.timedelta(days=i)
+                day_str = day.isoformat()
+                count = heatmap_data.get(day_str, 0)
+                if count == 0:
+                    color = "#ebedf0"
+                elif count < 5:
+                    color = "#9be9a8"
+                elif count < 15:
+                    color = "#40c463"
+                elif count < 30:
+                    color = "#30a14e"
+                else:
+                    color = "#216e39"
+                html_cells += f'<div class="heatmap-cell" style="background-color:{color};" title="{day_str}: {count} Karten"></div>'
+            st.markdown(f'<div style="display:flex;flex-wrap:wrap;">{html_cells}</div>', unsafe_allow_html=True)
+        else:
+            st.info("Noch keine Aktivitätsdaten vorhanden.")
+
+    with col2:
+        # Achievements Übersicht
+        st.markdown("**🏆 Achievements**")
+        earned = len(stats.achievements) if stats else 0
+        total = len(ACHIEVEMENTS)
+        st.progress(earned / total, text=f"{earned}/{total} freigeschaltet")
+
+
+def page_upload_and_generate():
+    st.title("📄 Dokumente hochladen & Karteikarten erzeugen")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        subject = st.selectbox("Fach / Studienrichtung", ["Rechtswissenschaften", "Medizin", "Informatik", "Physik", "Andere"])
+        topic = st.text_input("Thema / Kapitel (z.B. Strafrecht AT, Innere Medizin – KHK)", "")
+    with col2:
+        difficulty = st.selectbox("Schwierigkeit", ["Einsteiger", "Fortgeschritten", "Examensniveau"])
+
+    # Neue Optionen für Kartenanzahl und Multiple-Choice
+    st.markdown("### ⚙️ Generierungsoptionen")
+    col3, col4 = st.columns(2)
+    with col3:
+        num_cards = st.slider(
+            "Anzahl Karteikarten",
+            min_value=5,
+            max_value=50,
+            value=20,
+            step=5,
+            help="Wie viele Karteikarten sollen generiert werden? Bei umfangreichem Material können mehr Karten erzeugt werden."
+        )
+    with col4:
+        card_format = st.selectbox(
+            "Kartenformat",
+            ["Gemischt (empfohlen)", "Nur Multiple-Choice", "Nur Freitext"],
+            help="Multiple-Choice: 4 Optionen mit einer richtigen Antwort. Freitext: Offene Fragen."
+        )
+
+    uploaded_files = st.file_uploader(
+        "Skripte, Bücher, PDFs, Bilder etc. hochladen",
+        type=["pdf", "docx", "txt", "png", "jpg", "jpeg"],
+        accept_multiple_files=True
+    )
+
+    if st.button("👓 Analysieren & Karteikarten erzeugen"):
+        if not uploaded_files:
+            st.warning("Bitte mindestens eine Datei hochladen.")
+            return
+
+        combined_text = ""
+        for uf in uploaded_files:
+            text = extract_text_from_uploaded_file(uf)
+            combined_text += "\n\n" + text
+
+        # Textlänge prüfen und ggf. kürzen (max ~100k Zeichen für Kontextfenster)
+        MAX_TEXT_LENGTH = 100000
+        if len(combined_text) > MAX_TEXT_LENGTH:
+            st.warning(
+                f"⚠️ Der Text ist sehr lang ({len(combined_text):,} Zeichen). "
+                f"Er wird auf {MAX_TEXT_LENGTH:,} Zeichen gekürzt, um Fehler zu vermeiden. "
+                "Für bessere Ergebnisse teile große Dokumente auf."
+            )
+            combined_text = combined_text[:MAX_TEXT_LENGTH]
+
+        # Zeige Textstatistik
+        st.info(f"📊 Verarbeite {len(combined_text):,} Zeichen aus {len(uploaded_files)} Datei(en)")
+
+        with st.spinner(f"KI erstellt gerade {num_cards} Lernkarten…"):
+            card_specs = llm_generate_flashcards(
+                combined_text, subject, topic, difficulty,
+                num_cards=num_cards, card_format=card_format
+            )
+
+        if not card_specs:
+            st.error("Es konnten keine Karten erzeugt werden.")
+            return
+
+        deck = db_create_deck(st.session_state.user_id, f"{subject} – {topic}", subject, topic)
+
+        for spec in card_specs:
+            card = Card(
+                id=0,
+                deck_id=deck.id,
+                user_id=st.session_state.user_id,
+                subject=subject,
+                question=spec.get("question", ""),
+                answer=spec.get("answer", ""),
+                explanation=spec.get("explanation", ""),
+                choices=spec.get("choices"),
+                correct_choice_index=spec.get("correct_choice_index"),
+                due_date=dt.date.today(),
+            )
+            card.id = db_insert_card(card)
+
+        st.success(f"Es wurden {len(card_specs)} Karteikarten im Deck '{deck.name}' angelegt.")
+
+
+def render_card_study_ui(card: Card):
+    bg_color = SUBJECT_COLORS.get(card.subject, "#ffffff")
+
+    st.markdown(
+        f'<div class="question-card" style="background-color:{bg_color};">'
+        f'<strong>Frage:</strong> {card.question}</div>',
+        unsafe_allow_html=True
+    )
+
+    # Verwende den vor der Sitzung gewaehlten Antwortmodus
+    mode = st.session_state.study_answer_mode
+
+    result = None
+    feedback = None
+
+    # Multiple Choice nur wenn Modus gewaehlt UND Karte MC-Optionen hat
+    if mode == "Multiple Choice" and card.choices and card.correct_choice_index is not None:
+        st.info("Modus: Multiple Choice")
+        choice = st.radio("Antwort wählen:", card.choices, key=f"choice_{card.id}")
+        if st.button("Antwort prüfen", key=f"check_mc_{card.id}"):
+            idx = card.choices.index(choice)
+            if idx == card.correct_choice_index:
+                result = "correct"
+                feedback = "✅ Richtig!"
+            else:
+                result = "wrong"
+                feedback = f"❌ Falsch. Richtige Antwort: **{card.choices[card.correct_choice_index]}**"
     else:
-        st.info(f"Seite '{page}' wird noch entwickelt...")
+        # Freitext-Modus (oder MC gewuenscht aber keine Optionen verfuegbar)
+        if mode == "Multiple Choice" and (not card.choices or card.correct_choice_index is None):
+            st.warning("Diese Karte hat keine Multiple-Choice-Optionen. Bitte als Freitext beantworten.")
+        else:
+            st.info("Modus: Freitext (KI-Bewertung)")
+
+        user_text = st.text_area("Deine Antwort (Freitext)", height=150, key=f"ft_{card.id}")
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            clicked_check = st.button("Antwort bewerten", key=f"check_ft_{card.id}")
+        with col2:
+            clicked_skip = st.button("Skip", key=f"skip_{card.id}")
+        with col3:
+            show_solution = st.button("Loesung anzeigen", key=f"solution_{card.id}")
+
+        if clicked_skip:
+            result = "skip"
+            feedback = "⏭ Frage wurde uebersprungen. Karte wandert in den Sondertopf."
+        elif clicked_check:
+            eval_result = llm_evaluate_free_text_answer(user_text, card)
+            if eval_result["grade"] == "correct":
+                result = "correct"
+                feedback = "✅ Deine Antwort wird als richtig gewertet."
+            elif eval_result["grade"] == "partial":
+                result = "wrong"
+                feedback = "⚠️ Teilweise richtig. " + eval_result.get("explanation", "")
+            else:
+                result = "wrong"
+                feedback = "❌ Falsch. " + eval_result.get("explanation", "")
+        elif show_solution:
+            feedback = f"📘 Musterloesung:\n\n{card.answer}\n\n{card.explanation}"
+
+    return result, feedback
 
 
-def render_dashboard(role: str):
-    """Rendert das Dashboard für die jeweilige Rolle."""
+def page_study_cards():
+    st.title("🧠 Lernen mit Karteikarten")
+
+    plan = st.session_state.study_plan
+    render_timeline(plan)
+
+    decks = db_get_decks(st.session_state.user_id)
+    if not decks:
+        st.info("Noch keine Decks vorhanden. Lade zuerst Dokumente hoch und lass Karten erzeugen.")
+        return
+
+    deck_names = {f"{d.subject} – {d.topic} (#{d.id})": d.id for d in decks}
+    chosen = st.selectbox("Deck auswählen", list(deck_names.keys()))
+    chosen_deck_id = deck_names[chosen]
+
+    col1, col2 = st.columns(2)
+    with col1:
+        max_cards = st.slider("Anzahl Karten für diese Sitzung", 5, 50, 15)
+    with col2:
+        answer_mode = st.radio(
+            "Antwortmodus",
+            ["Freitext", "Multiple Choice"],
+            index=0 if st.session_state.study_answer_mode == "Freitext" else 1,
+            horizontal=True,
+            help="Freitext: KI bewertet deine Antwort. Multiple Choice: Auswahl aus vorgegebenen Optionen."
+        )
+
+    include_special = st.checkbox("Sondertopf bevorzugt einbeziehen", value=True)
+
+    if st.button("Lernsitzung starten"):
+        st.session_state.study_answer_mode = answer_mode
+        st.session_state.current_cards = db_select_next_due_cards(
+            user_id=st.session_state.user_id,
+            deck_id=chosen_deck_id,
+            max_cards=max_cards,
+            include_special_bucket=include_special,
+        )
+        st.session_state.current_card_index = 0
+
+    if not st.session_state.current_cards:
+        return
+
+    index = st.session_state.current_card_index
+    if index >= len(st.session_state.current_cards):
+        st.success("Diese Lernsitzung ist abgeschlossen! 🎉")
+        return
+
+    card = st.session_state.current_cards[index]
+    st.markdown(f"**Karte {index+1} von {len(st.session_state.current_cards)}**")
+    result, feedback = render_card_study_ui(card)
+
+    if feedback:
+        st.info(feedback)
+
+    if result in ["correct", "wrong", "skip"]:
+        update_card_after_result(card, result)
+        if st.button("Nächste Karte"):
+            st.session_state.current_card_index += 1
+
+
+def page_plan_and_calendar():
+    st.title("📆 Lernplan & Kalender")
+
+    plan: StudyPlan = st.session_state.study_plan
+
+    st.subheader("Zeitraum der Vorbereitung")
+    col1, col2 = st.columns(2)
+    with col1:
+        start = st.date_input("Startdatum", plan.start_date)
+    with col2:
+        end = st.date_input("Prüfungsdatum / Enddatum", plan.end_date)
+
+    plan.start_date = start
+    plan.end_date = end
+
+    st.subheader("Freie Tage (kein Lernen)")
+    free_days_str = ", ".join([d.isoformat() for d in plan.free_days]) if plan.free_days else ""
+    new_free_days_str = st.text_input("Freie Tage (Komma-getrennt, Format YYYY-MM-DD)", value=free_days_str)
+    if st.button("Freie Tage übernehmen"):
+        try:
+            days = [s.strip() for s in new_free_days_str.split(",") if s.strip()]
+            plan.free_days = [dt.date.fromisoformat(s) for s in days]
+            db_update_study_plan(plan)
+            st.success("Freie Tage wurden aktualisiert.")
+        except Exception:
+            st.error("Fehler beim Parsen der Datumsangaben.")
+
+    st.subheader("Gewichtung von Themen im Lernplan")
+    decks = db_get_decks(plan.user_id)
+    topics = sorted({f"{d.subject}: {d.topic}" for d in decks})
+    new_weights: Dict[str, float] = {}
+
+    for t in topics:
+        new_weights[t] = st.slider(f"Gewichtung für {t}", 0.0, 1.0, plan.topic_weights.get(t, 0.0), 0.05)
+
+    if st.button("Gewichtungen speichern"):
+        plan.topic_weights = new_weights
+        db_update_study_plan(plan)
+        st.success("Themen-Gewichtungen gespeichert.")
+
+    st.subheader("Timeline-Vorschau")
+    render_timeline(plan)
+
+
+def page_stats():
+    st.title("📊 Auswertung & Lernanalyse")
+
+    cards = db_get_all_cards(st.session_state.user_id)
+    if not cards:
+        st.info("Noch keine Karten vorhanden.")
+        return
+
+    total = len(cards)
+    reviewed = [c for c in cards if c.last_reviewed is not None]
+    special = [c for c in cards if c.in_special_bucket]
+
+    st.metric("Gesamtzahl Karten", total)
+    st.metric("Bereits einmal gelernt", len(reviewed))
+    st.metric("Im Sondertopf", len(special))
+
+    st.write("Hier können später detailliertere Statistiken nach Fach/Thema und Fehlerquote ergänzt werden.")
+
+
+def page_exam_simulation():
+    st.title("🎤 Prüfungssimulation (schriftlich / mündlich)")
+
+    mode = st.radio("Prüfungsart", ["Schriftlich (Text)", "Mündlich (Audio)"], horizontal=True)
+    subject = st.selectbox("Fach / Gebiet", ["Rechtswissenschaften", "Medizin", "Informatik", "Physik", "Andere"])
+    topic = st.text_input("Thema / Schwerpunkt (z.B. Strafrecht BT – Körperverletzung)")
+    duration = st.slider("Dauer (Minuten)", 15, 180, 45)
+    level = st.selectbox("Niveau", ["Grundlagen", "Fortgeschritten", "Examensniveau", "Staatsexamen"])
+
+    if st.button("Prüfung starten"):
+        with st.spinner("KI erstellt die Prüfungssimulation…"):
+            exam_spec = llm_generate_exam(
+                subject,
+                topic,
+                duration,
+                level,
+                mode="mündlich" if mode.startswith("Mündlich") else "schriftlich"
+            )
+        st.session_state.current_exam = {
+            "subject": subject,
+            "topic": topic,
+            "duration": duration,
+            "mode": "audio" if mode.startswith("Mündlich") else "text",
+            "questions": exam_spec.get("questions", []),
+            "answers": [],
+            "start_time": dt.datetime.now()
+        }
+        st.success("Prüfung gestartet.")
+
+    exam = st.session_state.current_exam
+    if not exam:
+        return
+
+    st.subheader(f"Aktuelle Prüfung: {exam['subject']} – {exam['topic']} ({exam['duration']} Min.)")
+
+    elapsed = (dt.datetime.now() - exam["start_time"]).seconds // 60
+    remaining = max(exam["duration"] - elapsed, 0)
+    st.info(f"Verbleibende Zeit: {remaining} Minuten (ungefähre Anzeige)")
+
+    if not exam["questions"]:
+        st.warning("Noch keine Fragen verfügbar (KI-Antwort leer).")
+        return
+
+    q = exam["questions"][0]
+    st.markdown(f"**Fall / Aufgabe:** {q.get('prompt', '')}")
+    for sp in q.get("sub_prompts", []):
+        st.markdown(f"- {sp}")
+
+    answer_text = ""
+
+    if exam["mode"] == "text":
+        answer_text = st.text_area("Deine Lösung / Fallbearbeitung", height=250, key="exam_answer_text")
+    else:
+        uploaded_audio = st.file_uploader("Audioantwort hochladen (z.B. mp3/wav)", type=["mp3", "wav"], key="exam_audio")
+        if uploaded_audio is not None and st.button("Audio transkribieren"):
+            with st.spinner("Audio wird transkribiert mit OpenAI Whisper…"):
+                answer_text = stt_transcribe_audio(uploaded_audio.read(), uploaded_audio.name)
+            st.text_area("Transkribierte Antwort", answer_text, height=250, key="exam_answer_from_audio")
+
+    if st.button("Antwort auswerten"):
+        st.warning("Hier kann später eine KI-Analyse der Prüfungsantwort eingebaut werden (Hinweisfragen, Themen für Sondertopf etc.).")
+
+    if st.button("Prüfung abbrechen"):
+        st.session_state.current_exam = None
+        st.info("Prüfungssimulation wurde abgebrochen.")
+
+
+def generate_audio_script(cards: List[Card], subject: str, topic: str) -> str:
+    """
+    Generiert ein natuerliches Hoerbuch-Skript aus Karteikarten mittels KI.
+    """
+    cards_text = "\n\n".join([
+        f"Frage {i+1}: {c.question}\nAntwort: {c.answer}\nErklaerung: {c.explanation}"
+        for i, c in enumerate(cards)
+    ])
+
+    system_prompt = """
+Du bist ein erfahrener Dozent, der Lerninhalte als Hoerbuch aufbereitet.
+Erstelle aus den gegebenen Karteikarten ein zusammenhaengendes, gut strukturiertes
+Hoerbuch-Skript. Der Text soll:
+- Natuerlich und fluessig klingen (zum Vorlesen geeignet)
+- Die wichtigsten Konzepte erklaeren
+- Zusammenhaenge zwischen den Themen herstellen
+- Mit einer kurzen Einfuehrung beginnen und einem Fazit enden
+- Keine Aufzaehlungszeichen oder Formatierungen enthalten (nur Fliesstext)
+"""
+
+    user_prompt = f"""
+FACH: {subject}
+THEMA: {topic}
+
+KARTEIKARTEN:
+{cards_text}
+
+Erstelle ein Hoerbuch-Skript (ca. 500-1000 Woerter), das diese Inhalte didaktisch aufbereitet vermittelt.
+"""
+
+    try:
+        return call_llm(system_prompt, user_prompt)
+    except LLMError as e:
+        st.error(f"Fehler bei der Skript-Generierung: {e}")
+        return ""
+
+
+def page_audio_video_modes():
+    st.title("🎧 Audio- & 🎬 Video-Lernen")
+
+    st.write("""
+    Hier kannst du Lerninhalte als **Hoerbuch** (Audio) anhoeren oder als **Lernkarten-Slideshow** durchgehen.
+    Die KI erstellt ein natuerliches Hoerbuch-Skript aus deinen Karteikarten.
+    """)
+
+    # Pruefe OpenAI-Key fuer Audio
+    if not st.session_state.openai_api_key.strip():
+        st.warning("⚠️ Fuer Audio-Funktionen wird ein OpenAI-API-Key benoetigt. Bitte unter 'KI-Einstellungen' hinterlegen.")
+
+    decks = db_get_decks(st.session_state.user_id)
+    if not decks:
+        st.info("Noch keine Decks vorhanden. Lade zuerst Dokumente hoch und lass Karten erzeugen.")
+        return
+
+    deck_names = {f"{d.subject} – {d.topic} (#{d.id})": d.id for d in decks}
+    chosen = st.selectbox("Deck / Thema auswaehlen", list(deck_names.keys()))
+    chosen_deck_id = deck_names[chosen]
+
+    # Finde das gewaehlte Deck
+    chosen_deck = next((d for d in decks if d.id == chosen_deck_id), None)
+
+    mode = st.radio("Modus waehlen", ["🎧 Audio (Hoerbuch)", "🎬 Lernkarten-Slideshow"], horizontal=True)
+
+    if mode.startswith("🎧"):
+        # Audio-Modus
+        st.subheader("Audio-Einstellungen")
+
+        col1, col2 = st.columns(2)
+        with col1:
+            voice = st.selectbox(
+                "Stimme auswaehlen",
+                ["alloy", "echo", "fable", "onyx", "nova", "shimmer"],
+                help="Verschiedene OpenAI TTS-Stimmen mit unterschiedlichen Charakteristiken"
+            )
+        with col2:
+            script_mode = st.radio(
+                "Skript-Modus",
+                ["KI-Hoerbuch (empfohlen)", "Rohdaten (Frage/Antwort)"],
+                help="KI-Hoerbuch: Natuerlicher Fliesstext. Rohdaten: Direkte Frage-Antwort-Paare."
+            )
+
+        if st.button("🎧 Audio generieren"):
+            cards_for_deck = db_get_cards_by_deck(chosen_deck_id, st.session_state.user_id)
+
+            if not cards_for_deck:
+                st.warning("Keine Karten in diesem Deck vorhanden.")
+                return
+
+            # Generiere Skript
+            if script_mode.startswith("KI"):
+                with st.spinner("KI erstellt Hoerbuch-Skript..."):
+                    script = generate_audio_script(
+                        cards_for_deck,
+                        chosen_deck.subject if chosen_deck else "Allgemein",
+                        chosen_deck.topic if chosen_deck else "Allgemein"
+                    )
+            else:
+                script = "\n\n".join([
+                    f"Frage: {c.question}. Antwort: {c.answer}. {c.explanation}"
+                    for c in cards_for_deck
+                ])
+
+            if not script:
+                st.error("Konnte kein Skript generieren.")
+                return
+
+            # Zeige Skript
+            with st.expander("📝 Generiertes Skript anzeigen"):
+                st.text_area("Skript", script, height=300)
+
+            # Generiere Audio
+            with st.spinner("Generiere Audio mit OpenAI TTS..."):
+                audio_bytes = tts_generate_audio_from_text(script, voice=voice)
+
+            if audio_bytes:
+                st.success("✅ Audio erfolgreich generiert!")
+
+                # Audio-Player
+                st.audio(audio_bytes, format="audio/mp3")
+
+                # Download-Button
+                st.download_button(
+                    label="⬇️ Audio herunterladen (MP3)",
+                    data=audio_bytes,
+                    file_name=f"hoerbuch_{chosen_deck.topic if chosen_deck else 'lerninhalt'}.mp3",
+                    mime="audio/mpeg"
+                )
+            else:
+                st.error("Audio-Generierung fehlgeschlagen. Bitte OpenAI-API-Key pruefen.")
+
+    else:
+        # Slideshow-Modus
+        st.subheader("🎬 Lernkarten-Slideshow")
+
+        cards_for_deck = db_get_cards_by_deck(chosen_deck_id, st.session_state.user_id)
+
+        if not cards_for_deck:
+            st.warning("Keine Karten in diesem Deck vorhanden.")
+            return
+
+        # Slideshow-Navigation
+        if "slideshow_index" not in st.session_state:
+            st.session_state.slideshow_index = 0
+
+        total_cards = len(cards_for_deck)
+        current_idx = st.session_state.slideshow_index
+
+        # Navigation
+        col1, col2, col3 = st.columns([1, 2, 1])
+        with col1:
+            if st.button("⬅️ Zurueck", disabled=current_idx == 0):
+                st.session_state.slideshow_index -= 1
+                st.rerun()
+        with col2:
+            st.markdown(f"<h3 style='text-align: center;'>Karte {current_idx + 1} / {total_cards}</h3>", unsafe_allow_html=True)
+        with col3:
+            if st.button("Weiter ➡️", disabled=current_idx >= total_cards - 1):
+                st.session_state.slideshow_index += 1
+                st.rerun()
+
+        # Aktuelle Karte anzeigen
+        if current_idx < total_cards:
+            card = cards_for_deck[current_idx]
+            bg_color = SUBJECT_COLORS.get(card.subject, "#f5f5f5")
+
+            # Slide-Darstellung
+            st.markdown(f"""
+            <div style="
+                background: linear-gradient(135deg, {bg_color} 0%, #ffffff 100%);
+                padding: 2rem;
+                border-radius: 1rem;
+                box-shadow: 0 10px 40px rgba(0,0,0,0.15);
+                margin: 1rem 0;
+                min-height: 300px;
+            ">
+                <h2 style="color: #1e3a5f; margin-bottom: 1rem;">❓ Frage</h2>
+                <p style="font-size: 1.2rem; color: #333; line-height: 1.6;">{card.question}</p>
+            </div>
+            """, unsafe_allow_html=True)
+
+            # Antwort aufdecken
+            if st.button("💡 Antwort anzeigen", key=f"show_answer_{current_idx}"):
+                st.markdown(f"""
+                <div style="
+                    background: linear-gradient(135deg, #e8f5e9 0%, #ffffff 100%);
+                    padding: 2rem;
+                    border-radius: 1rem;
+                    box-shadow: 0 10px 40px rgba(0,0,0,0.15);
+                    margin: 1rem 0;
+                ">
+                    <h2 style="color: #2e7d32; margin-bottom: 1rem;">✅ Antwort</h2>
+                    <p style="font-size: 1.1rem; color: #333; line-height: 1.6;">{card.answer}</p>
+                    {"<hr style='margin: 1rem 0;'><p style='color: #666;'><strong>Erklaerung:</strong> " + card.explanation + "</p>" if card.explanation else ""}
+                </div>
+                """, unsafe_allow_html=True)
+
+        # Zurueck zum Anfang
+        if st.button("🔄 Slideshow von vorne starten"):
+            st.session_state.slideshow_index = 0
+            st.rerun()
+
+
+def page_llm_settings():
+    st.title("⚙️ KI-Einstellungen")
+
+    st.write("Hier wählst du, ob die App über OpenAI (ChatGPT) oder Anthropic (Claude) läuft und kannst den API-Key hinterlegen.")
+
+    provider = st.radio(
+        "KI-Provider auswählen",
+        ["OpenAI (ChatGPT)", "Anthropic (Claude)"],
+        index=0 if st.session_state.llm_provider == "openai" else 1,
+        horizontal=True,
+    )
+
+    if provider.startswith("OpenAI"):
+        st.session_state.llm_provider = "openai"
+    else:
+        st.session_state.llm_provider = "anthropic"
+
+    if st.session_state.llm_provider == "openai":
+        st.subheader("🔑 OpenAI-API-Key")
+        st.info("Den Key bekommst du im OpenAI-Dashboard unter 'API Keys'.")
+        st.session_state.openai_api_key = st.text_input(
+            "OpenAI API Key",
+            value=st.session_state.openai_api_key,
+            type="password",
+            help="Wird nur in der aktuellen Streamlit-Session gehalten.",
+        )
+    else:
+        st.subheader("🔑 Anthropic-API-Key")
+        st.info("Den Key bekommst du im Claude-Dashboard unter 'API Keys'.")
+        st.session_state.anthropic_api_key = st.text_input(
+            "Anthropic API Key",
+            value=st.session_state.anthropic_api_key,
+            type="password",
+            help="Wird nur in der aktuellen Streamlit-Session gehalten.",
+        )
+
+    if st.button("🔌 Verbindung testen"):
+        test_llm_connection()
+
+    status = st.session_state.llm_connection_status
+    if status == "ok":
+        st.success("Verbindung steht. Du kannst jetzt Lernkarten, Prüfungen etc. mit KI generieren. ✅")
+    elif isinstance(status, str) and status not in (None, "ok"):
+        st.error(f"Aktueller Verbindungsstatus: {status}")
+    else:
+        st.info("Noch kein Verbindungstest durchgeführt.")
+
+
+# ============================================================
+# 9b. Neue Seiten (Gamification, Tutor, Analytics, etc.)
+# ============================================================
+
+def page_gamification():
+    """Gamification-Seite mit Achievements, XP-Details und Statistiken."""
+    st.title("🎮 Gamification & Achievements")
+
+    stats = st.session_state.user_stats
+
+    # Level und XP
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Level", stats.level, delta=None)
+        current_xp, next_xp = get_xp_for_next_level(stats.total_xp)
+        st.progress((stats.total_xp - current_xp) / max(next_xp - current_xp, 1),
+                   text=f"{stats.total_xp} / {next_xp} XP")
+
+    with col2:
+        st.metric("🔥 Aktueller Streak", f"{stats.current_streak} Tage")
+        st.metric("📈 Längster Streak", f"{stats.longest_streak} Tage")
+
+    with col3:
+        st.metric("📚 Karten gelernt", stats.total_cards_learned)
+        st.metric("✅ Richtig beantwortet", stats.total_correct)
+
+    # Achievements Grid
+    st.subheader("🏆 Achievements")
+
+    cols = st.columns(4)
+    for i, (ach_id, ach) in enumerate(ACHIEVEMENTS.items()):
+        with cols[i % 4]:
+            is_earned = ach_id in stats.achievements
+            card_class = "achievement-card" if is_earned else "achievement-card achievement-locked"
+            st.markdown(f"""
+            <div class="{card_class}">
+                <div style="font-size:2rem;">{ach['icon']}</div>
+                <div><strong>{ach['name']}</strong></div>
+                <div style="font-size:0.8rem;">{ach['desc']}</div>
+                <div style="color:#666;font-size:0.75rem;">+{ach['xp']} XP</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+    # XP-Verlauf
+    st.subheader("📈 XP-Verlauf")
+    sessions = db_get_study_sessions(st.session_state.user_id, 30)
+    if sessions:
+        # Gruppiere nach Tag
+        daily_xp = defaultdict(int)
+        for s in sessions:
+            daily_xp[s["date"]] += s.get("xp_earned", 0)
+
+        dates = sorted(daily_xp.keys())
+        xp_values = [daily_xp[d] for d in dates]
+
+        # Einfaches Balkendiagramm
+        if dates:
+            st.bar_chart(dict(zip(dates[-14:], xp_values[-14:])))
+    else:
+        st.info("Noch keine XP-Daten vorhanden. Starte eine Lernsession!")
+
+
+def page_tutor_chat():
+    """KI-Tutor Chat-Seite."""
+    st.title("🤖 KI-Tutor")
+    st.write("Stelle Fragen zu deinem Lernstoff und erhalte personalisierte Erklärungen.")
+
+    # Thema wählen
+    decks = db_get_decks(st.session_state.user_id)
+    topic_options = ["Allgemein"] + [f"{d.subject}: {d.topic}" for d in decks]
+    selected_topic = st.selectbox("Thema/Kontext wählen", topic_options)
+
+    # Chat-Verlauf laden
+    chat_history = db_get_tutor_chat(st.session_state.user_id, 20)
+
+    # Chat-Container
+    chat_container = st.container()
+    with chat_container:
+        for msg in chat_history:
+            if msg["role"] == "user":
+                st.chat_message("user").write(msg["content"])
+            else:
+                st.chat_message("assistant").write(msg["content"])
+
+    # Eingabe
+    user_input = st.chat_input("Stelle eine Frage...")
+
+    if user_input:
+        # User-Nachricht speichern und anzeigen
+        db_save_tutor_message(st.session_state.user_id, "user", user_input, selected_topic)
+        st.chat_message("user").write(user_input)
+
+        # KI-Antwort generieren
+        system_prompt = f"""Du bist ein freundlicher und kompetenter Tutor.
+Thema/Kontext: {selected_topic}
+
+Deine Aufgaben:
+- Erkläre Konzepte klar und verständlich
+- Nutze Beispiele und Analogien
+- Stelle Rückfragen um das Verständnis zu prüfen
+- Gib Tipps zum effektiven Lernen
+- Wenn der Nutzer "Erkläre wie für ein Kind" sagt, vereinfache maximal
+
+Antworte auf Deutsch und sei ermutigend."""
+
+        try:
+            with st.spinner("KI denkt nach..."):
+                response = call_llm(system_prompt, user_input)
+            db_save_tutor_message(st.session_state.user_id, "assistant", response, selected_topic)
+            st.chat_message("assistant").write(response)
+        except LLMError as e:
+            st.error(f"Fehler: {e}")
+
+    # Chat löschen Button
+    if st.button("🗑️ Chat-Verlauf löschen"):
+        db_clear_tutor_chat(st.session_state.user_id)
+        st.rerun()
+
+    # Erklärmodus-Buttons
+    st.markdown("---")
+    st.markdown("**Schnell-Aktionen:**")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        if st.button("👶 Erkläre einfach"):
+            st.session_state.tutor_quick = "Erkläre das letzte Thema so einfach wie möglich, als wäre ich 5 Jahre alt."
+    with col2:
+        if st.button("📝 Zusammenfassung"):
+            st.session_state.tutor_quick = "Fasse die wichtigsten Punkte zum aktuellen Thema zusammen."
+    with col3:
+        if st.button("❓ Quiz mich"):
+            st.session_state.tutor_quick = "Stelle mir eine Verständnisfrage zum Thema."
+
+
+def page_analytics():
+    """Erweiterte Analytics-Seite."""
+    st.title("📈 Erweiterte Lernanalyse")
+
+    tab1, tab2, tab3 = st.tabs(["📊 Übersicht", "🎯 Schwächen", "⏰ Beste Lernzeit"])
+
+    with tab1:
+        st.subheader("Aktivitäts-Heatmap (letztes Jahr)")
+        heatmap_data = db_get_activity_heatmap(st.session_state.user_id, 365)
+
+        if heatmap_data:
+            # Kalender-Grid rendern
+            today = dt.date.today()
+            weeks_html = ""
+
+            for week in range(52):
+                week_html = ""
+                for day in range(7):
+                    date = today - dt.timedelta(days=(51-week)*7 + (6-day))
+                    date_str = date.isoformat()
+                    count = heatmap_data.get(date_str, 0)
+
+                    if count == 0:
+                        color = "#ebedf0"
+                    elif count < 5:
+                        color = "#9be9a8"
+                    elif count < 15:
+                        color = "#40c463"
+                    elif count < 30:
+                        color = "#30a14e"
+                    else:
+                        color = "#216e39"
+
+                    week_html += f'<div class="heatmap-cell" style="background-color:{color};" title="{date_str}: {count}"></div>'
+
+                weeks_html += f'<div style="display:flex;flex-direction:column;">{week_html}</div>'
+
+            st.markdown(f'<div style="display:flex;gap:2px;overflow-x:auto;">{weeks_html}</div>',
+                       unsafe_allow_html=True)
+
+            # Legende
+            st.markdown("""
+            <div style="display:flex;gap:10px;align-items:center;margin-top:10px;">
+                <span>Weniger</span>
+                <div class="heatmap-cell" style="background-color:#ebedf0;"></div>
+                <div class="heatmap-cell" style="background-color:#9be9a8;"></div>
+                <div class="heatmap-cell" style="background-color:#40c463;"></div>
+                <div class="heatmap-cell" style="background-color:#30a14e;"></div>
+                <div class="heatmap-cell" style="background-color:#216e39;"></div>
+                <span>Mehr</span>
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            st.info("Noch keine Aktivitätsdaten vorhanden.")
+
+        # Sessions der letzten 30 Tage
+        st.subheader("Letzte Lernsessions")
+        sessions = db_get_study_sessions(st.session_state.user_id, 30)
+        if sessions:
+            for s in sessions[:10]:
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.write(f"📅 {s['date']}")
+                with col2:
+                    st.write(f"📚 {s['cards_seen']} Karten")
+                with col3:
+                    accuracy = s['cards_correct'] / s['cards_seen'] * 100 if s['cards_seen'] > 0 else 0
+                    st.write(f"✅ {accuracy:.0f}% richtig")
+                with col4:
+                    st.write(f"⭐ +{s.get('xp_earned', 0)} XP")
+
+    with tab2:
+        st.subheader("🎯 Schwächen-Analyse")
+        weaknesses = db_get_weakness_analysis(st.session_state.user_id)
+
+        if weaknesses:
+            for w in weaknesses:
+                error_rate = w['error_rate'] * 100 if w['error_rate'] else 0
+                color = "red" if error_rate > 50 else "orange" if error_rate > 30 else "green"
+
+                st.markdown(f"""
+                **{w['subject']}**
+                - Fehlerquote: <span style="color:{color};">{error_rate:.1f}%</span>
+                - {w['correct']} richtig / {w['wrong']} falsch
+                """, unsafe_allow_html=True)
+
+                st.progress(1 - (error_rate / 100))
+        else:
+            st.info("Noch keine Daten für Schwächen-Analyse. Lerne mehr Karten!")
+
+    with tab3:
+        st.subheader("⏰ Beste Lernzeiten")
+        best_times = db_get_best_study_times(st.session_state.user_id)
+
+        if best_times:
+            # Sortiere nach Erfolgsquote
+            sorted_times = sorted(best_times.items(), key=lambda x: x[1], reverse=True)
+
+            st.write("Deine erfolgreichsten Lernzeiten:")
+            for hour, success_rate in sorted_times[:5]:
+                time_str = f"{hour:02d}:00 - {(hour+1):02d}:00"
+                st.write(f"🕐 **{time_str}**: {success_rate*100:.0f}% Erfolgsquote")
+
+            # Empfehlung
+            if sorted_times:
+                best_hour = sorted_times[0][0]
+                st.success(f"💡 Empfehlung: Lerne am besten zwischen {best_hour:02d}:00 und {best_hour+1:02d}:00 Uhr!")
+        else:
+            st.info("Noch keine Daten vorhanden. Lerne zu verschiedenen Zeiten!")
+
+
+def page_import_export():
+    """Import/Export-Seite."""
+    st.title("📥 Import / 📤 Export")
+
+    tab1, tab2, tab3 = st.tabs(["📤 Exportieren", "📥 Importieren", "🔗 Teilen"])
+
+    with tab1:
+        st.subheader("Deck exportieren")
+        decks = db_get_decks(st.session_state.user_id)
+
+        if not decks:
+            st.info("Keine Decks zum Exportieren vorhanden.")
+        else:
+            deck_names = {f"{d.name} ({d.subject})": d.id for d in decks}
+            selected_deck = st.selectbox("Deck wählen", list(deck_names.keys()))
+            deck_id = deck_names[selected_deck]
+
+            export_format = st.radio("Format", ["JSON", "CSV"], horizontal=True)
+
+            if st.button("📤 Exportieren"):
+                if export_format == "JSON":
+                    data = export_deck_to_json(deck_id, st.session_state.user_id)
+                    st.download_button(
+                        "⬇️ JSON herunterladen",
+                        data,
+                        file_name=f"deck_{deck_id}.json",
+                        mime="application/json"
+                    )
+                else:
+                    data = export_deck_to_csv(deck_id, st.session_state.user_id)
+                    st.download_button(
+                        "⬇️ CSV herunterladen",
+                        data,
+                        file_name=f"deck_{deck_id}.csv",
+                        mime="text/csv"
+                    )
+
+    with tab2:
+        st.subheader("Deck importieren")
+
+        import_method = st.radio("Import-Methode", ["JSON-Datei", "Share-Code"], horizontal=True)
+
+        if import_method == "JSON-Datei":
+            uploaded_file = st.file_uploader("JSON-Datei hochladen", type=["json"])
+            if uploaded_file and st.button("📥 Importieren"):
+                json_str = uploaded_file.read().decode("utf-8")
+                success, message = import_deck_from_json(json_str, st.session_state.user_id)
+                if success:
+                    st.success(message)
+                else:
+                    st.error(message)
+        else:
+            share_code = st.text_input("Share-Code eingeben", max_chars=8)
+            if share_code and st.button("📥 Mit Code importieren"):
+                success, message = import_deck_by_share_code(share_code.upper(), st.session_state.user_id)
+                if success:
+                    st.success(message)
+                else:
+                    st.error(message)
+
+    with tab3:
+        st.subheader("Deck teilen")
+        decks = db_get_decks(st.session_state.user_id)
+
+        if not decks:
+            st.info("Keine Decks zum Teilen vorhanden.")
+        else:
+            deck_names = {f"{d.name} ({d.subject})": d.id for d in decks}
+            selected_deck = st.selectbox("Deck zum Teilen wählen", list(deck_names.keys()), key="share_deck")
+            deck_id = deck_names[selected_deck]
+
+            if st.button("🔗 Share-Code generieren"):
+                code = generate_share_code(deck_id)
+                st.success(f"Share-Code: **{code}**")
+                st.info("Teile diesen Code mit anderen, damit sie dein Deck importieren können.")
+
+
+def page_pomodoro():
+    """Pomodoro-Timer Seite."""
+    st.title("🍅 Pomodoro-Timer")
+
+    st.write("""
+    Die Pomodoro-Technik: 25 Minuten fokussiertes Lernen, dann 5 Minuten Pause.
+    Nach 4 Pomodoros eine längere Pause (15-30 Min).
+    """)
 
     col1, col2 = st.columns(2)
 
     with col1:
-        render_card("Aktive Projekte", """
-            <p style="font-size: 2em; font-weight: bold; color: #0066cc;">12</p>
-            <p>3 neue diese Woche</p>
-        """)
-
-        render_card("Offene Meilensteine", """
-            <p><span class="status-badge status-red">3 Überfällig</span></p>
-            <p><span class="status-badge status-orange">5 Diese Woche</span></p>
-            <p><span class="status-badge status-green">8 Im Plan</span></p>
-        """)
+        st.subheader("Timer-Einstellungen")
+        work_duration = st.slider("Arbeitszeit (Minuten)", 15, 60, 25)
+        break_duration = st.slider("Pause (Minuten)", 3, 15, 5)
 
     with col2:
-        render_card("Timeline", """
-            <p>🔴 Gutachten ausstehend</p>
-            <p>🟠 Reparatur in Arbeit</p>
-            <p>🟢 Ersatzwagen bereit</p>
-        """)
+        st.subheader("Statistik")
+        st.metric("🍅 Heute abgeschlossen", st.session_state.pomodoro_sessions_completed)
 
-        render_card("Letzte Aktivitäten", """
-            <p>• Neues Projekt angelegt (heute)</p>
-            <p>• Gutachten hochgeladen (gestern)</p>
-            <p>• Zahlung eingegangen (vor 3 Tagen)</p>
-        """)
+    st.markdown("---")
+
+    # Timer-Anzeige
+    if st.session_state.pomodoro_running and st.session_state.pomodoro_start_time:
+        elapsed = (dt.datetime.now() - st.session_state.pomodoro_start_time).seconds
+        duration = (break_duration if st.session_state.pomodoro_break else work_duration) * 60
+        remaining = max(0, duration - elapsed)
+
+        minutes = remaining // 60
+        seconds = remaining % 60
+
+        phase = "☕ Pause" if st.session_state.pomodoro_break else "📚 Lernzeit"
+        st.markdown(f"### {phase}")
+        st.markdown(f'<div class="pomodoro-timer">{minutes:02d}:{seconds:02d}</div>', unsafe_allow_html=True)
+
+        progress = elapsed / duration
+        st.progress(min(progress, 1.0))
+
+        if remaining == 0:
+            if st.session_state.pomodoro_break:
+                st.balloons()
+                st.success("Pause vorbei! Bereit für die nächste Runde?")
+                st.session_state.pomodoro_break = False
+            else:
+                st.session_state.pomodoro_sessions_completed += 1
+                st.success("🎉 Pomodoro abgeschlossen! Zeit für eine Pause.")
+                st.session_state.pomodoro_break = True
+
+            st.session_state.pomodoro_running = False
+
+        if st.button("⏹️ Stoppen"):
+            st.session_state.pomodoro_running = False
+            st.session_state.pomodoro_start_time = None
+            st.rerun()
+
+        # Auto-refresh
+        st.empty()
+
+    else:
+        st.markdown('<div class="pomodoro-timer">00:00</div>', unsafe_allow_html=True)
+
+        if st.button("▶️ Starten", type="primary"):
+            st.session_state.pomodoro_running = True
+            st.session_state.pomodoro_start_time = dt.datetime.now()
+            st.session_state.pomodoro_duration = work_duration
+            st.rerun()
+
+    # Tipp
+    st.markdown("---")
+    st.info("💡 **Tipp:** Nutze den Pomodoro-Timer während du Karteikarten lernst oder mit dem KI-Tutor arbeitest!")
 
 
-def render_projects():
-    """Rendert die Projektübersicht."""
+def page_cloze_cards():
+    """Lückentext-Karten Seite."""
+    st.title("📝 Lückentext-Karten (Cloze)")
 
-    # Demo-Daten
-    projects = [
-        {"id": "PRJ-001", "name": "Müller vs. Schmidt", "status": "In Bearbeitung", "datum": "2024-01-15"},
-        {"id": "PRJ-002", "name": "Weber Unfall A7", "status": "Abgeschlossen", "datum": "2024-01-10"},
-        {"id": "PRJ-003", "name": "Fischer Parkschaden", "status": "Neu", "datum": "2024-01-20"},
-    ]
+    st.write("""
+    Lückentext-Karten sind besonders effektiv für Definitionen und Fakten.
+    Syntax: `{{c1::versteckter Text}}` für Lücken.
+    """)
 
-    for proj in projects:
-        status_class = {
-            "Neu": "status-orange",
-            "In Bearbeitung": "status-green",
-            "Abgeschlossen": "status-green"
-        }.get(proj["status"], "status-orange")
+    tab1, tab2 = st.tabs(["➕ Erstellen", "📚 Lernen"])
 
+    with tab1:
+        st.subheader("Neue Lückentext-Karte erstellen")
+
+        decks = db_get_decks(st.session_state.user_id)
+        if not decks:
+            st.warning("Erstelle zuerst ein Deck unter 'Upload & Karten'.")
+            return
+
+        deck_names = {f"{d.name}": d.id for d in decks}
+        selected_deck = st.selectbox("Deck wählen", list(deck_names.keys()))
+        deck_id = deck_names[selected_deck]
+
+        # Beispiel zeigen
+        st.info("Beispiel: 'Der {{c1::Bundestag}} wählt den {{c2::Bundeskanzler}}.'")
+
+        cloze_text = st.text_area(
+            "Lückentext eingeben",
+            placeholder="Der {{c1::wichtige Begriff}} ist entscheidend für {{c2::ein Konzept}}.",
+            height=150
+        )
+
+        explanation = st.text_input("Erklärung (optional)")
+
+        if st.button("✅ Karte speichern"):
+            if cloze_text and "{{c" in cloze_text:
+                deck = next(d for d in decks if d.id == deck_id)
+                db_insert_cloze_card(deck_id, st.session_state.user_id, deck.subject, cloze_text, explanation)
+                st.success("Lückentext-Karte gespeichert!")
+            else:
+                st.error("Bitte gültigen Lückentext eingeben (mit {{c1::...}} Syntax).")
+
+        # KI-Generierung
+        st.markdown("---")
+        st.subheader("🤖 KI-generierte Lückentext-Karten")
+
+        source_text = st.text_area("Quelltext für KI", placeholder="Füge hier Text ein...", height=100)
+
+        if st.button("🤖 Lückentexte generieren"):
+            if source_text:
+                with st.spinner("KI erstellt Lückentexte..."):
+                    system_prompt = """Erstelle aus dem gegebenen Text 3-5 Lückentext-Karten.
+                    Format: Jede Zeile eine Karte mit {{c1::...}} Syntax für die Lücken.
+                    Verstecke die wichtigsten Begriffe/Konzepte."""
+
+                    try:
+                        result = call_llm(system_prompt, source_text)
+                        st.text_area("Generierte Lückentexte (kopieren & bearbeiten):", result, height=200)
+                    except LLMError as e:
+                        st.error(f"Fehler: {e}")
+
+    with tab2:
+        st.subheader("Lückentext-Karten lernen")
+
+        decks = db_get_decks(st.session_state.user_id)
+        if not decks:
+            return
+
+        deck_names = {f"{d.name}": d.id for d in decks}
+        selected_deck = st.selectbox("Deck wählen", list(deck_names.keys()), key="cloze_learn_deck")
+        deck_id = deck_names[selected_deck]
+
+        cloze_cards = db_get_cloze_cards(deck_id, st.session_state.user_id)
+
+        if not cloze_cards:
+            st.info("Keine Lückentext-Karten in diesem Deck.")
+            return
+
+        # Aktuelle Karte
+        if "cloze_index" not in st.session_state:
+            st.session_state.cloze_index = 0
+        if "cloze_revealed" not in st.session_state:
+            st.session_state.cloze_revealed = []
+
+        idx = st.session_state.cloze_index % len(cloze_cards)
+        card = cloze_cards[idx]
+
+        st.markdown(f"**Karte {idx + 1} / {len(cloze_cards)}**")
+
+        # Lücken parsen
+        clozes = parse_cloze_text(card["cloze_text"])
+
+        # Text mit Lücken anzeigen
+        rendered = render_cloze_with_blanks(card["cloze_text"], st.session_state.cloze_revealed)
         st.markdown(f"""
-        <div class="card">
-            <div style="display: flex; justify-content: space-between; align-items: center;">
-                <div>
-                    <strong>{proj['id']}</strong> - {proj['name']}
-                    <br><small>Erstellt: {proj['datum']}</small>
-                </div>
-                <span class="status-badge {status_class}">{proj['status']}</span>
-            </div>
+        <div class="question-card" style="font-size:1.2rem;">
+            {rendered}
         </div>
         """, unsafe_allow_html=True)
 
+        # Buttons für jede Lücke
+        cols = st.columns(len(clozes) + 2)
+        for i, (cloze_id, content) in enumerate(clozes):
+            with cols[i]:
+                if cloze_id not in st.session_state.cloze_revealed:
+                    if st.button(f"Lücke {cloze_id}", key=f"reveal_{cloze_id}"):
+                        st.session_state.cloze_revealed.append(cloze_id)
+                        st.rerun()
 
-if __name__ == "__main__":
-    main()
+        with cols[-2]:
+            if st.button("➡️ Nächste"):
+                st.session_state.cloze_index += 1
+                st.session_state.cloze_revealed = []
+                st.rerun()
+
+        with cols[-1]:
+            if st.button("🔄 Alle zeigen"):
+                st.session_state.cloze_revealed = [c[0] for c in clozes]
+                st.rerun()
+
+
+# ============================================================
+# 9b. Multiplayer / Lerngruppen Seiten
+# ============================================================
+
+def render_rank_badge(rank_id: str) -> str:
+    """Rendert ein Rang-Badge als HTML."""
+    rank = RANK_SYSTEM.get(rank_id, RANK_SYSTEM["bronze"])
+    return f'<span style="background:{rank["color"]}; padding:2px 8px; border-radius:10px; color:#fff;">{rank["icon"]} {rank["name"]}</span>'
+
+
+def page_multiplayer_hub():
+    """Hauptseite für alle Multiplayer-Features.
+
+    HINWEIS für Backend-Migration:
+    - Diese Seite sollte Echtzeit-Updates via WebSocket/Supabase Realtime erhalten
+    - Benutzer-Authentifizierung ist zwingend erforderlich für Multiplayer
+    - Rate-Limiting für API-Calls implementieren
+    """
+    st.title("👥 Multiplayer & Lerngruppen")
+
+    st.info("""
+    **Hinweis:** Multiplayer-Features sind für den lokalen Test vorbereitet.
+    Für echte Mehrspieler-Funktionen wird ein Backend (z.B. Supabase) benötigt.
+
+    **Was du hier testen kannst:**
+    - Lerngruppen erstellen und verwalten
+    - Simulations-Duelle gegen dich selbst
+    - Challenges und Rang-System
+    """)
+
+    # Benutzerprofil laden/erstellen
+    if st.session_state.user_profile is None:
+        st.session_state.user_profile = get_or_create_user_profile(
+            st.session_state.user_id,
+            st.session_state.multiplayer_username
+        )
+
+    profile = st.session_state.user_profile
+    stats = st.session_state.user_stats
+
+    # Profil-Übersicht
+    st.markdown("### 👤 Dein Profil")
+
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        current_rank = get_user_rank(stats.get("total_xp", 0))
+        st.markdown(f"""
+        <div class="metric-card" style="text-align:center;">
+            <div style="font-size:3rem;">{current_rank['icon']}</div>
+            <div style="font-weight:bold;">{current_rank['name']}</div>
+            <div style="font-size:0.8rem;color:#888;">Aktueller Rang</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with col2:
+        st.metric("Gesamte XP", f"{stats.get('total_xp', 0):,}")
+
+    with col3:
+        duels_won = profile.get("duels_won", 0) if isinstance(profile, dict) else 0
+        duels_played = profile.get("duels_played", 0) if isinstance(profile, dict) else 0
+        win_rate = (duels_won / duels_played * 100) if duels_played > 0 else 0
+        st.metric("Duelle gewonnen", f"{duels_won}/{duels_played}", f"{win_rate:.0f}%")
+
+    with col4:
+        groups = db_get_user_groups(st.session_state.user_id)
+        st.metric("Lerngruppen", len(groups))
+
+    # Rang-Fortschritt
+    st.markdown("### 📈 Rang-Fortschritt")
+    total_xp = stats.get("total_xp", 0)
+    current_rank_data = get_user_rank(total_xp)
+
+    # Nächsten Rang finden
+    next_rank = None
+    for rank_id, rank_data in RANK_SYSTEM.items():
+        if rank_data["min_xp"] > total_xp:
+            next_rank = rank_data
+            break
+
+    if next_rank:
+        progress = (total_xp - current_rank_data["min_xp"]) / (next_rank["min_xp"] - current_rank_data["min_xp"])
+        st.progress(min(progress, 1.0))
+        st.caption(f"{total_xp:,} / {next_rank['min_xp']:,} XP bis {next_rank['icon']} {next_rank['name']}")
+    else:
+        st.progress(1.0)
+        st.caption(f"🎉 Maximaler Rang erreicht! ({total_xp:,} XP)")
+
+    # Schnellzugriff
+    st.markdown("---")
+    st.markdown("### 🚀 Schnellzugriff")
+
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        st.markdown("""
+        <div class="card" style="padding:20px; text-align:center;">
+            <div style="font-size:2rem;">👥</div>
+            <div style="font-weight:bold;">Lerngruppen</div>
+            <div style="font-size:0.9rem;color:#888;">Zusammen lernen</div>
+        </div>
+        """, unsafe_allow_html=True)
+        if st.button("Zu Lerngruppen", key="nav_groups"):
+            st.session_state.mp_subpage = "groups"
+            st.rerun()
+
+    with col2:
+        st.markdown("""
+        <div class="card" style="padding:20px; text-align:center;">
+            <div style="font-size:2rem;">⚔️</div>
+            <div style="font-weight:bold;">Quiz-Duelle</div>
+            <div style="font-size:0.9rem;color:#888;">Wissen duellieren</div>
+        </div>
+        """, unsafe_allow_html=True)
+        if st.button("Zu Duellen", key="nav_duels"):
+            st.session_state.mp_subpage = "duels"
+            st.rerun()
+
+    with col3:
+        st.markdown("""
+        <div class="card" style="padding:20px; text-align:center;">
+            <div style="font-size:2rem;">🏆</div>
+            <div style="font-weight:bold;">Challenges</div>
+            <div style="font-size:0.9rem;color:#888;">Ziele erreichen</div>
+        </div>
+        """, unsafe_allow_html=True)
+        if st.button("Zu Challenges", key="nav_challenges"):
+            st.session_state.mp_subpage = "challenges"
+            st.rerun()
+
+    # Unterseite anzeigen
+    if "mp_subpage" in st.session_state:
+        st.markdown("---")
+        if st.session_state.mp_subpage == "groups":
+            render_learning_groups_section()
+        elif st.session_state.mp_subpage == "duels":
+            render_duels_section()
+        elif st.session_state.mp_subpage == "challenges":
+            render_challenges_section()
+
+
+def render_learning_groups_section():
+    """Rendert den Lerngruppen-Bereich.
+
+    HINWEIS für Backend-Migration:
+    - Gruppen-Mitgliedschaft über Supabase RLS (Row Level Security) absichern
+    - Join-Codes sollten serverseitig generiert und validiert werden
+    - Gruppen-Chat würde Supabase Realtime benötigen
+    """
+    st.subheader("👥 Lerngruppen")
+
+    tab1, tab2, tab3 = st.tabs(["Meine Gruppen", "Gruppe erstellen", "Gruppe beitreten"])
+
+    with tab1:
+        groups = db_get_user_groups(st.session_state.user_id)
+
+        if not groups:
+            st.info("Du bist noch in keiner Lerngruppe. Erstelle eine oder tritt einer bei!")
+        else:
+            for group in groups:
+                with st.expander(f"📚 {group['name']} ({group['member_count']} Mitglieder)", expanded=False):
+                    st.write(f"**Beschreibung:** {group['description']}")
+                    st.write(f"**Wöchentliches XP-Ziel:** {group['weekly_xp_goal']:,} XP")
+                    st.write(f"**Deine Rolle:** {group['role'].capitalize()}")
+                    st.write(f"**Beitrittscode:** `{group['join_code']}`")
+
+                    # Gruppen-Leaderboard
+                    st.markdown("**🏆 Wochenrangliste:**")
+                    members = db_get_group_members(group["id"])
+                    leaderboard = sorted(members, key=lambda m: m.get("weekly_xp", 0), reverse=True)
+
+                    for i, member in enumerate(leaderboard[:5], 1):
+                        medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"{i}."
+                        st.write(f"{medal} {member['username']}: {member.get('weekly_xp', 0):,} XP")
+
+    with tab2:
+        st.markdown("### Neue Lerngruppe erstellen")
+
+        group_name = st.text_input("Gruppenname", placeholder="z.B. Mathe-Lerngruppe WS24")
+        group_desc = st.text_area("Beschreibung", placeholder="Wofür ist diese Gruppe?")
+        weekly_goal = st.number_input("Wöchentliches XP-Ziel", min_value=100, max_value=10000, value=1000, step=100)
+        is_public = st.checkbox("Öffentliche Gruppe (jeder kann beitreten)")
+
+        if st.button("✅ Gruppe erstellen"):
+            if group_name:
+                result = db_create_learning_group(
+                    name=group_name,
+                    description=group_desc,
+                    creator_id=st.session_state.user_id,
+                    creator_username=st.session_state.multiplayer_username
+                )
+                if result:
+                    st.success(f"Gruppe '{group_name}' erstellt! Beitrittscode: `{result['join_code']}`")
+                    st.balloons()
+            else:
+                st.error("Bitte Gruppennamen eingeben.")
+
+    with tab3:
+        st.markdown("### Gruppe beitreten")
+
+        join_code = st.text_input("Beitrittscode eingeben", placeholder="z.B. ABC123")
+
+        if st.button("🔗 Beitreten"):
+            if join_code:
+                success = db_join_group_by_code(
+                    join_code.upper().strip(),
+                    st.session_state.user_id,
+                    st.session_state.multiplayer_username
+                )
+                if success:
+                    st.success("Erfolgreich beigetreten!")
+                    st.rerun()
+                else:
+                    st.error("Ungültiger Code oder bereits Mitglied.")
+            else:
+                st.error("Bitte einen Beitrittscode eingeben.")
+
+
+def render_duels_section():
+    """Rendert den Duell-Bereich.
+
+    HINWEIS für Backend-Migration:
+    - Duell-Logik MUSS serverseitig laufen, um Cheating zu verhindern
+    - Echtzeit-Synchronisation über WebSocket/Supabase Realtime
+    - Antworten-Validierung auf dem Server
+    - Zeitlimits serverseitig enforced
+    """
+    st.subheader("⚔️ Quiz-Duelle")
+
+    tab1, tab2, tab3 = st.tabs(["Aktive Duelle", "Neues Duell", "Duell-Historie"])
+
+    with tab1:
+        active_duels = db_get_active_duels(st.session_state.user_id)
+
+        if not active_duels:
+            st.info("Keine aktiven Duelle. Starte ein neues Duell!")
+        else:
+            for duel in active_duels:
+                is_challenger = duel["challenger_id"] == st.session_state.user_id
+                opponent_name = "Gegner"  # In Produktion: echten Namen laden
+
+                status_emoji = "⏳" if duel["status"] == "pending" else "⚔️"
+                your_score = duel["challenger_score"] if is_challenger else duel["opponent_score"]
+                opponent_score = duel["opponent_score"] if is_challenger else duel["challenger_score"]
+
+                with st.expander(f"{status_emoji} Duell #{duel['id']} - {your_score}:{opponent_score}"):
+                    st.write(f"**Status:** {duel['status'].capitalize()}")
+                    st.write(f"**Frage:** {duel['current_question']}/{DUEL_SETTINGS['questions_per_round']}")
+
+                    if duel["status"] == "active":
+                        if st.button("▶️ Weiterspielen", key=f"continue_duel_{duel['id']}"):
+                            st.session_state.active_duel = duel
+                            st.session_state.duel_answers = []
+                            st.rerun()
+
+    with tab2:
+        st.markdown("### Neues Quiz-Duell starten")
+
+        st.markdown("""
+        **Spielregeln:**
+        - {} Fragen pro Runde
+        - {} Sekunden pro Frage
+        - {} XP für einen Sieg
+        - {} XP pro richtige Antwort
+        - {} Bonus-XP für perfekte Runde!
+        """.format(
+            DUEL_SETTINGS["questions_per_round"],
+            DUEL_SETTINGS["time_per_question"],
+            DUEL_SETTINGS["xp_per_win"],
+            DUEL_SETTINGS["xp_per_correct"],
+            DUEL_SETTINGS["xp_bonus_perfect"]
+        ))
+
+        # Deck auswählen
+        decks = db_get_decks(st.session_state.user_id)
+        if not decks:
+            st.warning("Erstelle zuerst ein Deck mit Karten.")
+            return
+
+        deck_options = {d.name: d.id for d in decks}
+        selected_deck_name = st.selectbox("Deck für das Duell wählen", list(deck_options.keys()))
+        deck_id = deck_options[selected_deck_name]
+
+        # Karten prüfen
+        cards = db_get_cards(deck_id)
+        if len(cards) < DUEL_SETTINGS["questions_per_round"]:
+            st.warning(f"Mindestens {DUEL_SETTINGS['questions_per_round']} Karten benötigt.")
+            return
+
+        st.markdown("---")
+        st.markdown("**Spielmodus:**")
+
+        mode = st.radio("Wähle den Spielmodus", [
+            "🤖 Solo-Training (gegen KI-Simulation)",
+            "👥 Herausforderung senden (Demo)"
+        ])
+
+        if mode.startswith("🤖"):
+            if st.button("⚔️ Solo-Duell starten"):
+                # Solo-Duell simulieren
+                duel_data = db_create_duel(
+                    challenger_id=st.session_state.user_id,
+                    opponent_id=st.session_state.user_id,  # Selbst-Duell für Demo
+                    deck_id=deck_id
+                )
+                if duel_data:
+                    st.session_state.active_duel = duel_data
+                    st.session_state.duel_answers = []
+                    st.session_state.duel_start_time = dt.datetime.now()
+                    st.success("Duell gestartet!")
+                    st.rerun()
+        else:
+            st.info("""
+            **HINWEIS für Backend:**
+            In einer echten Multiplayer-Umgebung würde hier:
+            1. Eine Einladung an den Gegner gesendet
+            2. Push-Notification beim Gegner erscheinen
+            3. Echtzeit-Synchronisation während des Spiels erfolgen
+
+            Benötigt: Supabase Auth + Realtime + Push-Service
+            """)
+
+    with tab3:
+        st.markdown("### 📊 Duell-Statistiken")
+
+        profile = st.session_state.user_profile
+        if profile:
+            duels_won = profile.get("duels_won", 0) if isinstance(profile, dict) else 0
+            duels_played = profile.get("duels_played", 0) if isinstance(profile, dict) else 0
+
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Gespielte Duelle", duels_played)
+            with col2:
+                st.metric("Gewonnene Duelle", duels_won)
+            with col3:
+                win_rate = (duels_won / duels_played * 100) if duels_played > 0 else 0
+                st.metric("Siegquote", f"{win_rate:.1f}%")
+
+    # Aktives Duell anzeigen
+    if st.session_state.active_duel:
+        render_active_duel()
+
+
+def render_active_duel():
+    """Rendert ein aktives Quiz-Duell."""
+    st.markdown("---")
+    st.markdown("### ⚔️ AKTIVES DUELL")
+
+    duel = st.session_state.active_duel
+    deck_id = duel.get("deck_id")
+
+    if not deck_id:
+        st.error("Kein Deck für dieses Duell gefunden.")
+        st.session_state.active_duel = None
+        return
+
+    cards = db_get_cards(deck_id)
+    if len(cards) < DUEL_SETTINGS["questions_per_round"]:
+        st.error("Nicht genügend Karten im Deck.")
+        st.session_state.active_duel = None
+        return
+
+    # Zufällige Karten für Duell (konsistent basierend auf Duell-ID)
+    import random
+    random.seed(duel["id"])
+    duel_cards = random.sample(cards, DUEL_SETTINGS["questions_per_round"])
+
+    current_q = duel.get("current_question", 0)
+
+    if current_q >= len(duel_cards):
+        # Duell beendet
+        your_score = duel.get("challenger_score", 0)
+        total = len(duel_cards)
+
+        st.success(f"🎉 Duell beendet! Dein Ergebnis: {your_score}/{total}")
+
+        # XP berechnen und vergeben
+        xp_earned = your_score * DUEL_SETTINGS["xp_per_correct"]
+        if your_score == total:
+            xp_earned += DUEL_SETTINGS["xp_bonus_perfect"]
+            st.balloons()
+            st.success(f"🌟 PERFEKT! Bonus: +{DUEL_SETTINGS['xp_bonus_perfect']} XP")
+
+        xp_earned += DUEL_SETTINGS["xp_per_win"]  # Win-Bonus (gegen sich selbst)
+
+        # XP gutschreiben
+        stats = st.session_state.user_stats
+        new_xp = stats.get("total_xp", 0) + xp_earned
+        update_user_stats(st.session_state.user_id, {"total_xp": new_xp})
+        st.session_state.user_stats["total_xp"] = new_xp
+
+        st.info(f"💰 Verdiente XP: +{xp_earned}")
+
+        # Profil aktualisieren
+        if st.session_state.user_profile:
+            profile = st.session_state.user_profile
+            if isinstance(profile, dict):
+                profile["duels_played"] = profile.get("duels_played", 0) + 1
+                profile["duels_won"] = profile.get("duels_won", 0) + 1
+
+        if st.button("🔙 Zurück"):
+            st.session_state.active_duel = None
+            st.rerun()
+
+        return
+
+    # Aktuelle Frage
+    card = duel_cards[current_q]
+
+    # Fortschritt
+    progress = current_q / len(duel_cards)
+    st.progress(progress)
+    st.caption(f"Frage {current_q + 1} von {len(duel_cards)}")
+
+    # Score
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric("Dein Score", duel.get("challenger_score", 0))
+    with col2:
+        st.metric("Zeit pro Frage", f"{DUEL_SETTINGS['time_per_question']}s")
+
+    # Frage anzeigen
+    st.markdown(f"""
+    <div class="question-card" style="padding:20px; border:2px solid #ff6b6b;">
+        <h3>❓ Frage:</h3>
+        <p style="font-size:1.2rem;">{card.front}</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # Antwort eingeben
+    user_answer = st.text_input("Deine Antwort:", key=f"duel_answer_{current_q}")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        if st.button("✅ Antwort prüfen", key=f"check_duel_{current_q}"):
+            # Einfache Antwortprüfung (in Produktion: KI-basiert oder fuzzy matching)
+            correct_answer = card.back.lower().strip()
+            user_lower = user_answer.lower().strip()
+
+            is_correct = (
+                user_lower == correct_answer or
+                user_lower in correct_answer or
+                correct_answer in user_lower
+            )
+
+            if is_correct:
+                st.success("✅ Richtig!")
+                duel["challenger_score"] = duel.get("challenger_score", 0) + 1
+                check_and_award_achievement(st.session_state.user_id, "duel_perfect")
+            else:
+                st.error(f"❌ Falsch! Richtige Antwort: {card.back}")
+
+            duel["current_question"] = current_q + 1
+            st.session_state.active_duel = duel
+
+            # Kurze Pause, dann weiter
+            time.sleep(1)
+            st.rerun()
+
+    with col2:
+        if st.button("⏭️ Überspringen"):
+            st.warning(f"Übersprungen. Antwort war: {card.back}")
+            duel["current_question"] = current_q + 1
+            st.session_state.active_duel = duel
+            time.sleep(1)
+            st.rerun()
+
+    # Abbrechen-Option
+    if st.button("❌ Duell abbrechen"):
+        st.session_state.active_duel = None
+        st.rerun()
+
+
+def render_challenges_section():
+    """Rendert den Challenges-Bereich.
+
+    HINWEIS für Backend-Migration:
+    - Challenges sollten serverseitig validiert werden
+    - Tägliche Challenges via Cron-Job generieren
+    - Fortschritt in Echtzeit tracken
+    """
+    st.subheader("🏆 Challenges & Wettbewerbe")
+
+    tab1, tab2 = st.tabs(["Aktive Challenges", "Challenge erstellen"])
+
+    with tab1:
+        st.markdown("### 📅 Tägliche Challenges")
+
+        # Standard-Challenges anzeigen
+        for ch_type, ch_data in CHALLENGE_TYPES.items():
+            with st.expander(f"{ch_data['icon']} {ch_data['name']} - {ch_data['xp']} XP"):
+                desc = ch_data["desc"].format(target=10)  # Default target
+                st.write(desc)
+
+                # Simulations-Fortschritt
+                if ch_type == "daily_cards":
+                    cards_today = st.session_state.user_stats.get("cards_learned_today", 0)
+                    progress = min(cards_today / 10, 1.0)
+                    st.progress(progress)
+                    st.caption(f"{cards_today}/10 Karten heute gelernt")
+
+                    if cards_today >= 10:
+                        st.success("✅ Challenge abgeschlossen!")
+                        st.balloons()
+
+                elif ch_type == "weekly_streak":
+                    current_streak = st.session_state.user_stats.get("current_streak", 0)
+                    progress = min(current_streak / 7, 1.0)
+                    st.progress(progress)
+                    st.caption(f"{current_streak}/7 Tage Streak")
+
+                elif ch_type == "perfect_round":
+                    st.info("Beantworte 10 Karten in Folge richtig!")
+                    if st.button(f"▶️ Starten", key=f"start_{ch_type}"):
+                        st.info("Gehe zu 'Karteikarten lernen' um diese Challenge zu versuchen.")
+
+        st.markdown("---")
+        st.markdown("### 👥 Gruppen-Challenges")
+
+        groups = db_get_user_groups(st.session_state.user_id)
+        if groups:
+            for group in groups:
+                st.write(f"**{group['name']}:** Wöchentliches Ziel - {group['weekly_xp_goal']:,} XP")
+                # Gruppen-Fortschritt würde hier angezeigt
+                st.progress(0.3)  # Demo-Wert
+                st.caption("Gruppen-Fortschritt wird in Echtzeit aktualisiert (Backend erforderlich)")
+        else:
+            st.info("Tritt einer Lerngruppe bei, um an Gruppen-Challenges teilzunehmen!")
+
+    with tab2:
+        st.markdown("### Eigene Challenge erstellen")
+
+        st.info("""
+        **HINWEIS für Backend:**
+        Benutzerdefinierte Challenges benötigen:
+        - Serverseitige Validierung der Regeln
+        - Zeitgesteuerte Start/End-Logik
+        - Benachrichtigungssystem für Teilnehmer
+        """)
+
+        challenge_name = st.text_input("Challenge-Name", placeholder="z.B. 100-Karten-Marathon")
+        target_value = st.number_input("Zielwert", min_value=1, max_value=1000, value=50)
+
+        challenge_type = st.selectbox("Challenge-Typ", [
+            "Karten lernen",
+            "Streak halten",
+            "Perfekte Runden",
+            "Duelle gewinnen"
+        ])
+
+        duration = st.selectbox("Dauer", ["1 Tag", "3 Tage", "1 Woche", "1 Monat"])
+        xp_reward = st.slider("XP-Belohnung", 50, 500, 100, 50)
+
+        if st.button("🎯 Challenge erstellen (Demo)"):
+            st.success(f"Challenge '{challenge_name}' erstellt! (Demo-Modus)")
+            st.info("In einer echten Backend-Umgebung würde diese Challenge für alle Gruppenmitglieder sichtbar sein.")
+
+
+# ============================================================
+# 10. Navigation
+# ============================================================
+
+PAGES = {
+    "🏠 Übersicht": page_home,
+    "📄 Upload & Karten": page_upload_and_generate,
+    "🧠 Karteikarten lernen": page_study_cards,
+    "📝 Lückentext (Cloze)": page_cloze_cards,
+    "📆 Lernplan & Timeline": page_plan_and_calendar,
+    "📊 Auswertung": page_stats,
+    "📈 Erweiterte Analytik": page_analytics,
+    "🎤 Prüfungssimulation": page_exam_simulation,
+    "🎧 Audio / 🎬 Video": page_audio_video_modes,
+    "🤖 KI-Tutor": page_tutor_chat,
+    "🎮 Gamification": page_gamification,
+    "👥 Multiplayer": page_multiplayer_hub,
+    "🍅 Pomodoro": page_pomodoro,
+    "📥 Import/Export": page_import_export,
+    "⚙️ KI-Einstellungen": page_llm_settings,
+}
+
+st.sidebar.title("Navigation")
+
+# Gamification in Sidebar anzeigen
+render_gamification_header()
+
+choice = st.sidebar.radio("Menü", list(PAGES.keys()))
+PAGES[choice]()
+
+# Versionsanzeige in der Sidebar
+st.sidebar.markdown("---")
+st.sidebar.caption(f"Version {APP_VERSION}")
+st.sidebar.caption(f"Stand: {APP_LAST_UPDATE}")
