@@ -25,7 +25,7 @@ from dotenv import load_dotenv
 # ============================================================
 
 # App-Version
-APP_VERSION = "2.1.1"
+APP_VERSION = "2.1.2"
 APP_LAST_UPDATE = "2025-12-29"
 
 load_dotenv()  # .env-Datei laden, falls vorhanden
@@ -1918,9 +1918,20 @@ Ziele:
 
 Format:
 - Du antwortest ausschließlich mit einem JSON-Array.
-- Jedes Element ist ein Objekt mit den Schlüsseln "question", "answer", "explanation",
-  "choices" (oder null) und "correct_choice_index" (oder null).
-- Kein anderer Text außerhalb dieses JSON-Arrays.
+- Jedes Element ist ein Objekt mit den Schlüsseln:
+  * "question": Die Frage (String)
+  * "answer": Die korrekte Antwort (String)
+  * "explanation": Erklärung/Kontext (String)
+  * "choices": Array mit 4 vollständigen Antworttexten ODER null
+  * "correct_choice_index": Index 0-3 der richtigen Antwort ODER null
+
+KRITISCH für Multiple-Choice:
+- "choices" muss ein Array mit 4 VOLLSTÄNDIGEN ANTWORTTEXTEN sein
+- NIEMALS nur Buchstaben wie ["A", "B", "C", "D"] verwenden!
+- Beispiel korrekt: ["Der Bundestag", "Der Bundesrat", "Die Regierung", "Das Gericht"]
+- Beispiel FALSCH: ["A", "B", "C", "D"] oder ["A.", "B.", "C.", "D."]
+
+Kein anderer Text außerhalb des JSON-Arrays.
 """.strip()
 
 JURA_FLASHCARD_USER_PROMPT = """
@@ -2226,9 +2237,19 @@ def llm_generate_flashcards(
 WICHTIG - KARTENFORMAT:
 - Erzeuge GENAU {num_cards} Karteikarten.
 - ALLE Karten MÜSSEN Multiple-Choice sein.
-- Jede Karte hat genau 4 Antwortoptionen ("choices": ["A", "B", "C", "D"]).
-- Genau eine Option ist korrekt ("correct_choice_index": 0-3).
-- Distraktoren müssen plausibel aber eindeutig falsch sein.
+- Jede Karte hat genau 4 vollständige Antwortoptionen als Array.
+- "correct_choice_index" gibt den Index (0-3) der richtigen Antwort an.
+
+BEISPIEL für eine Multiple-Choice-Karte:
+{{
+  "question": "Was ist die Hauptstadt von Deutschland?",
+  "answer": "Berlin",
+  "explanation": "Berlin ist seit 1990 die Hauptstadt des vereinten Deutschlands.",
+  "choices": ["Berlin", "München", "Hamburg", "Frankfurt"],
+  "correct_choice_index": 0
+}}
+
+WICHTIG: Die choices müssen vollständige Antworttexte sein, NICHT nur Buchstaben!
 """
     elif card_format == "Nur Freitext":
         format_instruction = f"""
@@ -2236,15 +2257,41 @@ WICHTIG - KARTENFORMAT:
 - Erzeuge GENAU {num_cards} Karteikarten.
 - ALLE Karten sind Freitext-Karten (KEINE Multiple-Choice).
 - Setze "choices": null und "correct_choice_index": null.
-- Formuliere Fragen, die ausführliche Antworten erfordern.
+
+BEISPIEL für eine Freitext-Karte:
+{{
+  "question": "Erkläre das Prinzip der Gewaltenteilung.",
+  "answer": "Die Gewaltenteilung teilt die Staatsgewalt in Legislative, Exekutive und Judikative.",
+  "explanation": "Dieses Prinzip verhindert Machtmissbrauch durch gegenseitige Kontrolle.",
+  "choices": null,
+  "correct_choice_index": null
+}}
 """
     else:  # Gemischt
         format_instruction = f"""
 WICHTIG - KARTENFORMAT:
 - Erzeuge GENAU {num_cards} Karteikarten.
 - Mische Multiple-Choice und Freitext-Karten (ca. 50/50).
-- Multiple-Choice: 4 Optionen, 1 richtig, plausible Distraktoren.
-- Freitext: "choices": null, "correct_choice_index": null.
+
+BEISPIEL Multiple-Choice:
+{{
+  "question": "Welches Organ erlässt Bundesgesetze?",
+  "answer": "Der Bundestag",
+  "explanation": "Der Bundestag ist das gesetzgebende Organ auf Bundesebene.",
+  "choices": ["Der Bundestag", "Der Bundesrat", "Die Bundesregierung", "Das Bundesverfassungsgericht"],
+  "correct_choice_index": 0
+}}
+
+BEISPIEL Freitext:
+{{
+  "question": "Erkläre den Unterschied zwischen Vorsatz und Fahrlässigkeit.",
+  "answer": "Vorsatz ist wissentliches und willentliches Handeln, Fahrlässigkeit ist Außerachtlassung der Sorgfalt.",
+  "explanation": "Der Unterschied liegt im subjektiven Tatbestand.",
+  "choices": null,
+  "correct_choice_index": null
+}}
+
+WICHTIG: Bei Multiple-Choice müssen die choices vollständige Antworttexte sein, NICHT nur "A", "B", "C", "D"!
 """
 
     if subject == "Rechtswissenschaften":
