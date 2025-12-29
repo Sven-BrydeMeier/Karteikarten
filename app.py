@@ -25,7 +25,7 @@ from dotenv import load_dotenv
 # ============================================================
 
 # App-Version
-APP_VERSION = "2.1.3"
+APP_VERSION = "2.1.4"
 APP_LAST_UPDATE = "2025-12-29"
 
 load_dotenv()  # .env-Datei laden, falls vorhanden
@@ -3170,23 +3170,111 @@ def page_exam_simulation():
     for sp in q.get("sub_prompts", []):
         st.markdown(f"- {sp}")
 
-    answer_text = ""
+    # Prüfe ob bereits ausgewertet
+    if "exam_result" in st.session_state and st.session_state.exam_result:
+        result = st.session_state.exam_result
+        st.markdown("---")
+        st.subheader("📊 Auswertung")
 
+        # Bewertung anzeigen
+        grade = result.get("grade", "unbekannt")
+        grade_colors = {"sehr gut": "green", "gut": "lightgreen", "befriedigend": "orange",
+                       "ausreichend": "orange", "mangelhaft": "red", "ungenügend": "red"}
+        grade_color = grade_colors.get(grade.lower(), "gray")
+
+        st.markdown(f"**Gesamtbewertung:** <span style='color:{grade_color};font-size:1.5rem;'>{grade}</span>",
+                   unsafe_allow_html=True)
+
+        st.markdown("**Stärken:**")
+        for s in result.get("strengths", []):
+            st.markdown(f"✅ {s}")
+
+        st.markdown("**Verbesserungspotenzial:**")
+        for w in result.get("weaknesses", []):
+            st.markdown(f"⚠️ {w}")
+
+        if result.get("topics_to_review"):
+            st.markdown("**Themen zum Wiederholen:**")
+            for t in result.get("topics_to_review", []):
+                st.markdown(f"📚 {t}")
+
+        st.markdown("**Detailliertes Feedback:**")
+        st.info(result.get("detailed_feedback", ""))
+
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("🔄 Neue Prüfung"):
+                st.session_state.current_exam = None
+                st.session_state.exam_result = None
+                st.rerun()
+        with col2:
+            if st.button("📝 Antwort nochmal bearbeiten"):
+                st.session_state.exam_result = None
+                st.rerun()
+        return
+
+    # Antwort-Eingabe
     if exam["mode"] == "text":
         answer_text = st.text_area("Deine Lösung / Fallbearbeitung", height=250, key="exam_answer_text")
     else:
         uploaded_audio = st.file_uploader("Audioantwort hochladen (z.B. mp3/wav)", type=["mp3", "wav"], key="exam_audio")
+        answer_text = ""
         if uploaded_audio is not None and st.button("Audio transkribieren"):
             with st.spinner("Audio wird transkribiert mit OpenAI Whisper…"):
                 answer_text = stt_transcribe_audio(uploaded_audio.read(), uploaded_audio.name)
+                st.session_state.transcribed_answer = answer_text
             st.text_area("Transkribierte Antwort", answer_text, height=250, key="exam_answer_from_audio")
 
-    if st.button("Antwort auswerten"):
-        st.warning("Hier kann später eine KI-Analyse der Prüfungsantwort eingebaut werden (Hinweisfragen, Themen für Sondertopf etc.).")
+        # Verwende transkribierte Antwort falls vorhanden
+        if "transcribed_answer" in st.session_state:
+            answer_text = st.session_state.transcribed_answer
 
-    if st.button("Prüfung abbrechen"):
-        st.session_state.current_exam = None
-        st.info("Prüfungssimulation wurde abgebrochen.")
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("📊 Antwort auswerten", type="primary"):
+            if not answer_text or len(answer_text.strip()) < 20:
+                st.warning("Bitte gib eine ausführlichere Antwort ein (mind. 20 Zeichen).")
+            else:
+                with st.spinner("KI wertet deine Antwort aus..."):
+                    # KI-Auswertung
+                    system_prompt = f"""Du bist ein erfahrener Prüfer für {exam['subject']}.
+Bewerte die folgende Prüfungsantwort und gib konstruktives Feedback.
+
+Antworte im JSON-Format:
+{{
+    "grade": "Note (sehr gut/gut/befriedigend/ausreichend/mangelhaft/ungenügend)",
+    "strengths": ["Stärke 1", "Stärke 2"],
+    "weaknesses": ["Schwäche 1", "Schwäche 2"],
+    "topics_to_review": ["Thema 1", "Thema 2"],
+    "detailed_feedback": "Ausführliches Feedback..."
+}}"""
+
+                    user_prompt = f"""Prüfungsfrage: {q.get('prompt', '')}
+Teilfragen: {', '.join(q.get('sub_prompts', []))}
+Niveau: {level}
+
+Antwort des Prüflings:
+{answer_text}
+
+Bewerte diese Antwort."""
+
+                    try:
+                        result_raw = call_llm(system_prompt, user_prompt)
+                        result = extract_json_from_response(result_raw)
+                        st.session_state.exam_result = result
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Fehler bei der Auswertung: {e}")
+
+    with col2:
+        if st.button("❌ Prüfung abbrechen"):
+            st.session_state.current_exam = None
+            if "exam_result" in st.session_state:
+                del st.session_state.exam_result
+            if "transcribed_answer" in st.session_state:
+                del st.session_state.transcribed_answer
+            st.info("Prüfungssimulation wurde abgebrochen.")
+            st.rerun()
 
 
 def generate_audio_script(cards: List[Card], subject: str, topic: str) -> str:
@@ -3511,6 +3599,22 @@ def page_tutor_chat():
     topic_options = ["Allgemein"] + [f"{d.subject}: {d.topic}" for d in decks]
     selected_topic = st.selectbox("Thema/Kontext wählen", topic_options)
 
+    # Schnell-Aktionen (vor dem Chat-Verlauf für bessere UX)
+    st.markdown("**Schnell-Aktionen:**")
+    col1, col2, col3 = st.columns(3)
+    quick_action = None
+    with col1:
+        if st.button("👶 Erkläre einfach"):
+            quick_action = "Erkläre das letzte Thema so einfach wie möglich, als wäre ich 5 Jahre alt."
+    with col2:
+        if st.button("📝 Zusammenfassung"):
+            quick_action = "Fasse die wichtigsten Punkte zum aktuellen Thema zusammen."
+    with col3:
+        if st.button("❓ Quiz mich"):
+            quick_action = "Stelle mir eine Verständnisfrage zum Thema."
+
+    st.markdown("---")
+
     # Chat-Verlauf laden
     chat_history = db_get_tutor_chat(st.session_state.user_id, 20)
 
@@ -3526,10 +3630,13 @@ def page_tutor_chat():
     # Eingabe
     user_input = st.chat_input("Stelle eine Frage...")
 
-    if user_input:
+    # Verarbeite entweder Schnell-Aktion oder normale Eingabe
+    message_to_send = quick_action or user_input
+
+    if message_to_send:
         # User-Nachricht speichern und anzeigen
-        db_save_tutor_message(st.session_state.user_id, "user", user_input, selected_topic)
-        st.chat_message("user").write(user_input)
+        db_save_tutor_message(st.session_state.user_id, "user", message_to_send, selected_topic)
+        st.chat_message("user").write(message_to_send)
 
         # KI-Antwort generieren
         system_prompt = f"""Du bist ein freundlicher und kompetenter Tutor.
@@ -3546,30 +3653,17 @@ Antworte auf Deutsch und sei ermutigend."""
 
         try:
             with st.spinner("KI denkt nach..."):
-                response = call_llm(system_prompt, user_input)
+                response = call_llm(system_prompt, message_to_send)
             db_save_tutor_message(st.session_state.user_id, "assistant", response, selected_topic)
             st.chat_message("assistant").write(response)
         except LLMError as e:
             st.error(f"Fehler: {e}")
 
     # Chat löschen Button
+    st.markdown("---")
     if st.button("🗑️ Chat-Verlauf löschen"):
         db_clear_tutor_chat(st.session_state.user_id)
         st.rerun()
-
-    # Erklärmodus-Buttons
-    st.markdown("---")
-    st.markdown("**Schnell-Aktionen:**")
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        if st.button("👶 Erkläre einfach"):
-            st.session_state.tutor_quick = "Erkläre das letzte Thema so einfach wie möglich, als wäre ich 5 Jahre alt."
-    with col2:
-        if st.button("📝 Zusammenfassung"):
-            st.session_state.tutor_quick = "Fasse die wichtigsten Punkte zum aktuellen Thema zusammen."
-    with col3:
-        if st.button("❓ Quiz mich"):
-            st.session_state.tutor_quick = "Stelle mir eine Verständnisfrage zum Thema."
 
 
 def page_analytics():
