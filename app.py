@@ -25,8 +25,8 @@ from dotenv import load_dotenv
 # ============================================================
 
 # App-Version
-APP_VERSION = "2.1.4"
-APP_LAST_UPDATE = "2025-12-29"
+APP_VERSION = "2.1.5"
+APP_LAST_UPDATE = "2025-12-30"
 
 load_dotenv()  # .env-Datei laden, falls vorhanden
 
@@ -2318,7 +2318,9 @@ WICHTIG: Bei Multiple-Choice müssen die choices vollständige Antworttexte sein
         )
 
     try:
-        raw = call_llm(FLASHCARD_SYSTEM_PROMPT, user_prompt, max_tokens=8192)
+        # Skaliere max_tokens basierend auf Kartenanzahl (ca. 150 Tokens pro Karte + Buffer)
+        calculated_tokens = max(8192, num_cards * 200)
+        raw = call_llm(FLASHCARD_SYSTEM_PROMPT, user_prompt, max_tokens=calculated_tokens)
     except LLMError as e:
         st.error(f"KI-Fehler: {e}")
         return []
@@ -2811,8 +2813,8 @@ def page_upload_and_generate():
         num_cards = st.slider(
             "Anzahl Karteikarten",
             min_value=5,
-            max_value=50,
-            value=20,
+            max_value=100,
+            value=25,
             step=5,
             help="Wie viele Karteikarten sollen generiert werden? Bei umfangreichem Material können mehr Karten erzeugt werden."
         )
@@ -2822,6 +2824,18 @@ def page_upload_and_generate():
             ["Gemischt (empfohlen)", "Nur Multiple-Choice", "Nur Freitext"],
             help="Multiple-Choice: 4 Optionen mit einer richtigen Antwort. Freitext: Offene Fragen."
         )
+
+    # Erweiterte Optionen
+    with st.expander("🔧 Erweiterte Optionen"):
+        max_chars = st.slider(
+            "Maximale Textlänge (Zeichen)",
+            min_value=50000,
+            max_value=500000,
+            value=200000,
+            step=50000,
+            help="Maximale Anzahl Zeichen, die verarbeitet werden. Größere Texte benötigen mehr API-Credits."
+        )
+        st.caption(f"Aktuelles Limit: {max_chars:,} Zeichen (~{max_chars//4:,} Tokens)")
 
     uploaded_files = st.file_uploader(
         "Skripte, Bücher, PDFs, Bilder etc. hochladen",
@@ -2839,15 +2853,14 @@ def page_upload_and_generate():
             text = extract_text_from_uploaded_file(uf)
             combined_text += "\n\n" + text
 
-        # Textlänge prüfen und ggf. kürzen (max ~100k Zeichen für Kontextfenster)
-        MAX_TEXT_LENGTH = 100000
-        if len(combined_text) > MAX_TEXT_LENGTH:
+        # Textlänge prüfen und ggf. kürzen
+        if len(combined_text) > max_chars:
             st.warning(
                 f"⚠️ Der Text ist sehr lang ({len(combined_text):,} Zeichen). "
-                f"Er wird auf {MAX_TEXT_LENGTH:,} Zeichen gekürzt, um Fehler zu vermeiden. "
-                "Für bessere Ergebnisse teile große Dokumente auf."
+                f"Er wird auf {max_chars:,} Zeichen gekürzt. "
+                "Du kannst das Limit unter 'Erweiterte Optionen' erhöhen."
             )
-            combined_text = combined_text[:MAX_TEXT_LENGTH]
+            combined_text = combined_text[:max_chars]
 
         # Zeige Textstatistik
         st.info(f"📊 Verarbeite {len(combined_text):,} Zeichen aus {len(uploaded_files)} Datei(en)")
