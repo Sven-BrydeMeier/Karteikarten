@@ -25,8 +25,8 @@ from dotenv import load_dotenv
 # ============================================================
 
 # App-Version
-APP_VERSION = "2.1.5"
-APP_LAST_UPDATE = "2025-12-30"
+APP_VERSION = "2.1.6"
+APP_LAST_UPDATE = "2026-01-05"
 
 load_dotenv()  # .env-Datei laden, falls vorhanden
 
@@ -186,6 +186,11 @@ class Card:
     success_streak: int = 0
     in_special_bucket: bool = False
     tags: List[str] = field(default_factory=list)
+
+    # Bildunterstützung
+    image_data: Optional[str] = None  # Base64-kodiertes Bild
+    image_caption: Optional[str] = None  # Bildunterschrift
+    card_type: str = "standard"  # standard, image_question, image_answer, plant_id
 
 
 @dataclass
@@ -382,9 +387,20 @@ def init_db_schema():
             card_type TEXT DEFAULT 'standard',
             times_correct INTEGER DEFAULT 0,
             times_wrong INTEGER DEFAULT 0,
+            image_data TEXT,
+            image_caption TEXT,
             FOREIGN KEY(deck_id) REFERENCES decks(id)
         )
         """)
+        # Migration: Füge Bildspalten hinzu falls nicht vorhanden
+        try:
+            c.execute("ALTER TABLE cards ADD COLUMN image_data TEXT")
+        except:
+            pass
+        try:
+            c.execute("ALTER TABLE cards ADD COLUMN image_caption TEXT")
+        except:
+            pass
         c.execute("""
         CREATE TABLE IF NOT EXISTS study_plan (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -573,6 +589,13 @@ def init_db_schema():
 
 
 def row_to_card(row: sqlite3.Row) -> Card:
+    # Sichere Getter für optionale Spalten (für Abwärtskompatibilität)
+    def safe_get(key, default=None):
+        try:
+            return row[key]
+        except (IndexError, KeyError):
+            return default
+
     return Card(
         id=row["id"],
         deck_id=row["deck_id"],
@@ -589,6 +612,9 @@ def row_to_card(row: sqlite3.Row) -> Card:
         success_streak=row["success_streak"],
         in_special_bucket=bool(row["in_special_bucket"]),
         tags=json.loads(row["tags_json"]) if row["tags_json"] else [],
+        image_data=safe_get("image_data"),
+        image_caption=safe_get("image_caption"),
+        card_type=safe_get("card_type", "standard"),
     )
 
 
@@ -628,8 +654,9 @@ def db_insert_card(card: Card) -> int:
             INSERT INTO cards (
                 deck_id, user_id, subject, question, answer, explanation,
                 choices_json, correct_choice_index, box, due_date,
-                last_reviewed, success_streak, in_special_bucket, tags_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                last_reviewed, success_streak, in_special_bucket, tags_json,
+                card_type, image_data, image_caption
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             card.deck_id,
             card.user_id,
@@ -645,6 +672,9 @@ def db_insert_card(card: Card) -> int:
             card.success_streak,
             1 if card.in_special_bucket else 0,
             json.dumps(card.tags) if card.tags else None,
+            card.card_type,
+            card.image_data,
+            card.image_caption,
         ))
         card_id = c.lastrowid
         conn.commit()
@@ -2801,7 +2831,10 @@ def page_upload_and_generate():
 
     col1, col2 = st.columns(2)
     with col1:
-        subject = st.selectbox("Fach / Studienrichtung", ["Rechtswissenschaften", "Medizin", "Informatik", "Physik", "Andere"])
+        subject = st.selectbox("Fach / Studienrichtung", [
+            "Rechtswissenschaften", "Medizin", "Informatik", "Physik",
+            "Garten- und Landschaftsbau", "Handwerk", "Andere"
+        ])
         topic = st.text_input("Thema / Kapitel (z.B. Strafrecht AT, Innere Medizin – KHK)", "")
     with col2:
         difficulty = st.selectbox("Schwierigkeit", ["Einsteiger", "Fortgeschritten", "Examensniveau"])
@@ -3139,7 +3172,10 @@ def page_exam_simulation():
     st.title("🎤 Prüfungssimulation (schriftlich / mündlich)")
 
     mode = st.radio("Prüfungsart", ["Schriftlich (Text)", "Mündlich (Audio)"], horizontal=True)
-    subject = st.selectbox("Fach / Gebiet", ["Rechtswissenschaften", "Medizin", "Informatik", "Physik", "Andere"])
+    subject = st.selectbox("Fach / Gebiet", [
+        "Rechtswissenschaften", "Medizin", "Informatik", "Physik",
+        "Garten- und Landschaftsbau", "Handwerk", "Andere"
+    ])
     topic = st.text_input("Thema / Schwerpunkt (z.B. Strafrecht BT – Körperverletzung)")
     duration = st.slider("Dauer (Minuten)", 15, 180, 45)
     level = st.selectbox("Niveau", ["Grundlagen", "Fortgeschritten", "Examensniveau", "Staatsexamen"])
@@ -4061,7 +4097,362 @@ def page_cloze_cards():
 
 
 # ============================================================
-# 9b. Multiplayer / Lerngruppen Seiten
+# 9c. Bildkarten / Pflanzenkunde
+# ============================================================
+
+def image_to_base64(uploaded_file) -> str:
+    """Konvertiert ein hochgeladenes Bild zu Base64."""
+    import io
+    from PIL import Image
+
+    # Bild laden und ggf. verkleinern für Speichereffizienz
+    img = Image.open(uploaded_file)
+
+    # Maximale Größe: 800x800 Pixel
+    max_size = (800, 800)
+    img.thumbnail(max_size, Image.Resampling.LANCZOS)
+
+    # Als JPEG speichern (kleiner als PNG)
+    buffer = io.BytesIO()
+    if img.mode in ('RGBA', 'LA', 'P'):
+        img = img.convert('RGB')
+    img.save(buffer, format='JPEG', quality=85)
+    buffer.seek(0)
+
+    return base64.b64encode(buffer.read()).decode('utf-8')
+
+
+def display_card_image(image_data: str, caption: str = None):
+    """Zeigt ein Base64-kodiertes Bild an."""
+    if image_data:
+        st.markdown(f"""
+        <div style="text-align: center; margin: 1rem 0;">
+            <img src="data:image/jpeg;base64,{image_data}"
+                 style="max-width: 100%; max-height: 400px; border-radius: 10px; box-shadow: 0 4px 12px rgba(0,0,0,0.15);">
+            {f'<p style="color: #666; font-style: italic; margin-top: 0.5rem;">{caption}</p>' if caption else ''}
+        </div>
+        """, unsafe_allow_html=True)
+
+
+def page_image_cards():
+    """Bildkarten-Seite für Pflanzenkunde und visuelle Lernkarten."""
+    st.title("🌿 Bildkarten & Pflanzenkunde")
+
+    st.write("""
+    Erstelle Lernkarten mit Bildern – ideal für **Pflanzenkunde**, **Garten- und Landschaftsbau**,
+    **Materialkunde** und alle visuellen Lernthemen.
+    """)
+
+    tab1, tab2, tab3 = st.tabs(["➕ Karte erstellen", "📚 Bildkarten lernen", "🌱 Pflanzenliste"])
+
+    with tab1:
+        st.subheader("Neue Bildkarte erstellen")
+
+        # Deck auswählen oder erstellen
+        decks = db_get_decks(st.session_state.user_id)
+
+        col1, col2 = st.columns(2)
+        with col1:
+            if decks:
+                deck_options = ["➕ Neues Deck erstellen"] + [f"{d.name}" for d in decks]
+                selected_option = st.selectbox("Deck wählen", deck_options)
+            else:
+                selected_option = "➕ Neues Deck erstellen"
+                st.info("Noch keine Decks vorhanden. Erstelle ein neues Deck.")
+
+        with col2:
+            card_type = st.selectbox("Kartentyp", [
+                "🌱 Pflanze erkennen (Bild → Name)",
+                "🏷️ Name zuordnen (Name → Bild)",
+                "🔧 Werkzeug/Material",
+                "🏗️ Technik/Verfahren",
+                "📷 Freie Bildkarte"
+            ])
+
+        # Neues Deck erstellen
+        if selected_option == "➕ Neues Deck erstellen":
+            st.markdown("---")
+            st.markdown("**Neues Deck erstellen:**")
+            col1, col2 = st.columns(2)
+            with col1:
+                new_deck_name = st.text_input("Deck-Name", placeholder="z.B. Pflanzenkunde Stauden")
+            with col2:
+                new_deck_subject = st.selectbox("Fachbereich", [
+                    "Garten- und Landschaftsbau",
+                    "Pflanzenkunde",
+                    "Handwerk",
+                    "Andere"
+                ])
+            new_deck_topic = st.text_input("Thema", placeholder="z.B. Stauden, Gehölze, Pflasterarbeiten")
+
+            if st.button("📁 Deck erstellen"):
+                if new_deck_name and new_deck_topic:
+                    new_deck = db_create_deck(
+                        st.session_state.user_id,
+                        new_deck_name,
+                        new_deck_subject,
+                        new_deck_topic
+                    )
+                    st.success(f"Deck '{new_deck_name}' erstellt!")
+                    st.rerun()
+                else:
+                    st.error("Bitte Name und Thema eingeben.")
+            return
+
+        # Deck ID ermitteln
+        deck = next((d for d in decks if d.name == selected_option), None)
+        if not deck:
+            return
+        deck_id = deck.id
+
+        st.markdown("---")
+
+        # Bild hochladen
+        st.markdown("### 📷 Bild hochladen")
+        uploaded_image = st.file_uploader(
+            "Bild auswählen (JPG, PNG)",
+            type=["jpg", "jpeg", "png"],
+            help="Das Bild wird automatisch auf max. 800x800 Pixel verkleinert."
+        )
+
+        if uploaded_image:
+            st.image(uploaded_image, caption="Vorschau", use_container_width=True)
+
+        st.markdown("### ✏️ Karteninhalt")
+
+        # Je nach Kartentyp unterschiedliche Felder
+        if "Pflanze erkennen" in card_type:
+            st.info("**Modus:** Das Bild wird als Frage gezeigt, der Nutzer muss den Namen erraten.")
+            question = st.text_input("Frage", value="Wie heißt diese Pflanze?")
+            answer = st.text_input("Antwort (Pflanzenname)", placeholder="z.B. Lavandula angustifolia")
+            explanation = st.text_area(
+                "Erklärung / Zusatzinfos",
+                placeholder="Deutscher Name: Echter Lavendel\nFamilie: Lippenblütler\nStandort: sonnig, trocken",
+                height=100
+            )
+            image_caption = st.text_input("Bildunterschrift (optional)", placeholder="z.B. Blütenstand im Juli")
+            card_type_val = "plant_id"
+
+        elif "Name zuordnen" in card_type:
+            st.info("**Modus:** Der Name wird als Frage gezeigt, der Nutzer muss das passende Bild erkennen.")
+            answer = st.text_input("Pflanzenname (wird als Frage gezeigt)", placeholder="z.B. Lavandula angustifolia")
+            question = f"Erkennst du: {answer}?" if answer else ""
+            explanation = st.text_area(
+                "Erkennungsmerkmale",
+                placeholder="- Graugrüne, schmale Blätter\n- Violette Blütenähren\n- Intensiver Duft",
+                height=100
+            )
+            image_caption = st.text_input("Bildunterschrift (optional)")
+            card_type_val = "image_answer"
+
+        elif "Werkzeug" in card_type:
+            question = st.text_input("Frage", placeholder="z.B. Welches Werkzeug ist das?")
+            answer = st.text_input("Antwort", placeholder="z.B. Fugenkratzer")
+            explanation = st.text_area("Verwendung / Erklärung", placeholder="Wird zum Entfernen von Unkraut aus Pflasterfugen verwendet.", height=100)
+            image_caption = st.text_input("Bildunterschrift (optional)")
+            card_type_val = "image_question"
+
+        elif "Technik" in card_type:
+            question = st.text_input("Frage", placeholder="z.B. Welche Verlegetechnik ist hier zu sehen?")
+            answer = st.text_input("Antwort", placeholder="z.B. Fischgrätverband")
+            explanation = st.text_area("Erklärung", placeholder="Der Fischgrätverband bietet hohe Stabilität und wird oft für befahrene Flächen verwendet.", height=100)
+            image_caption = st.text_input("Bildunterschrift (optional)")
+            card_type_val = "image_question"
+
+        else:  # Freie Bildkarte
+            question = st.text_input("Frage")
+            answer = st.text_input("Antwort")
+            explanation = st.text_area("Erklärung (optional)", height=100)
+            image_caption = st.text_input("Bildunterschrift (optional)")
+            card_type_val = "image_question"
+
+        # Multiple Choice optional
+        with st.expander("🎯 Multiple-Choice Optionen (optional)"):
+            mc_enabled = st.checkbox("Multiple-Choice aktivieren")
+            if mc_enabled:
+                mc1 = st.text_input("Option 1 (richtig)", value=answer if answer else "")
+                mc2 = st.text_input("Option 2 (falsch)")
+                mc3 = st.text_input("Option 3 (falsch)")
+                mc4 = st.text_input("Option 4 (falsch)")
+                choices = [mc1, mc2, mc3, mc4] if all([mc1, mc2, mc3, mc4]) else None
+                correct_idx = 0
+            else:
+                choices = None
+                correct_idx = None
+
+        # Speichern
+        st.markdown("---")
+        if st.button("💾 Bildkarte speichern", type="primary"):
+            if not uploaded_image:
+                st.error("Bitte ein Bild hochladen.")
+            elif not question or not answer:
+                st.error("Bitte Frage und Antwort ausfüllen.")
+            else:
+                with st.spinner("Bild wird verarbeitet..."):
+                    try:
+                        image_b64 = image_to_base64(uploaded_image)
+
+                        card = Card(
+                            id=0,
+                            deck_id=deck_id,
+                            user_id=st.session_state.user_id,
+                            subject=deck.subject,
+                            question=question,
+                            answer=answer,
+                            explanation=explanation or "",
+                            choices=choices,
+                            correct_choice_index=correct_idx,
+                            due_date=dt.date.today(),
+                            card_type=card_type_val,
+                            image_data=image_b64,
+                            image_caption=image_caption or "",
+                        )
+                        card.id = db_insert_card(card)
+                        st.success(f"✅ Bildkarte gespeichert! (ID: {card.id})")
+                        st.balloons()
+                    except Exception as e:
+                        st.error(f"Fehler beim Speichern: {e}")
+
+    with tab2:
+        st.subheader("📚 Bildkarten lernen")
+
+        decks = db_get_decks(st.session_state.user_id)
+        if not decks:
+            st.info("Erstelle zuerst ein Deck mit Bildkarten.")
+            return
+
+        deck_names = {d.name: d.id for d in decks}
+        selected_deck = st.selectbox("Deck wählen", list(deck_names.keys()), key="learn_deck")
+        deck_id = deck_names[selected_deck]
+
+        # Nur Bildkarten laden
+        all_cards = db_get_cards_by_deck(deck_id, st.session_state.user_id)
+        image_cards = [c for c in all_cards if c.image_data]
+
+        if not image_cards:
+            st.info("Keine Bildkarten in diesem Deck. Erstelle welche im Tab 'Karte erstellen'.")
+            return
+
+        st.write(f"**{len(image_cards)} Bildkarten** in diesem Deck")
+
+        # Session State für Lernsitzung
+        if "img_card_idx" not in st.session_state:
+            st.session_state.img_card_idx = 0
+        if "img_show_answer" not in st.session_state:
+            st.session_state.img_show_answer = False
+
+        idx = st.session_state.img_card_idx % len(image_cards)
+        card = image_cards[idx]
+
+        # Fortschritt
+        st.progress((idx + 1) / len(image_cards), text=f"Karte {idx + 1} von {len(image_cards)}")
+
+        # Karte anzeigen
+        if card.card_type == "plant_id" or card.card_type == "image_question":
+            # Bild als Frage
+            display_card_image(card.image_data, card.image_caption)
+            st.markdown(f"### ❓ {card.question}")
+
+            if not st.session_state.img_show_answer:
+                user_answer = st.text_input("Deine Antwort:", key=f"img_ans_{card.id}")
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.button("✅ Prüfen", type="primary"):
+                        st.session_state.img_show_answer = True
+                        st.rerun()
+                with col2:
+                    if st.button("💡 Lösung zeigen"):
+                        st.session_state.img_show_answer = True
+                        st.rerun()
+            else:
+                st.success(f"**Antwort:** {card.answer}")
+                if card.explanation:
+                    st.info(f"**Erklärung:** {card.explanation}")
+
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    if st.button("✅ Gewusst"):
+                        update_card_after_result(card, "correct")
+                        st.session_state.img_card_idx += 1
+                        st.session_state.img_show_answer = False
+                        st.rerun()
+                with col2:
+                    if st.button("❌ Nicht gewusst"):
+                        update_card_after_result(card, "wrong")
+                        st.session_state.img_card_idx += 1
+                        st.session_state.img_show_answer = False
+                        st.rerun()
+                with col3:
+                    if st.button("⏭️ Überspringen"):
+                        st.session_state.img_card_idx += 1
+                        st.session_state.img_show_answer = False
+                        st.rerun()
+
+        else:  # image_answer - Name als Frage, Bild als Antwort
+            st.markdown(f"### ❓ {card.question}")
+
+            if not st.session_state.img_show_answer:
+                st.write("Stelle dir das Bild vor...")
+                if st.button("🖼️ Bild anzeigen", type="primary"):
+                    st.session_state.img_show_answer = True
+                    st.rerun()
+            else:
+                display_card_image(card.image_data, card.image_caption)
+                st.success(f"**{card.answer}**")
+                if card.explanation:
+                    st.info(card.explanation)
+
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.button("✅ Erkannt"):
+                        update_card_after_result(card, "correct")
+                        st.session_state.img_card_idx += 1
+                        st.session_state.img_show_answer = False
+                        st.rerun()
+                with col2:
+                    if st.button("❌ Nicht erkannt"):
+                        update_card_after_result(card, "wrong")
+                        st.session_state.img_card_idx += 1
+                        st.session_state.img_show_answer = False
+                        st.rerun()
+
+    with tab3:
+        st.subheader("🌱 Pflanzenliste")
+        st.write("Übersicht aller Pflanzen-Bildkarten")
+
+        decks = db_get_decks(st.session_state.user_id)
+        if not decks:
+            return
+
+        all_plant_cards = []
+        for deck in decks:
+            cards = db_get_cards_by_deck(deck.id, st.session_state.user_id)
+            plant_cards = [c for c in cards if c.image_data and c.card_type == "plant_id"]
+            all_plant_cards.extend(plant_cards)
+
+        if not all_plant_cards:
+            st.info("Noch keine Pflanzenkarten erstellt. Nutze den Tab 'Karte erstellen' mit dem Typ 'Pflanze erkennen'.")
+            return
+
+        st.write(f"**{len(all_plant_cards)} Pflanzen** in deiner Sammlung")
+
+        # Galerie-Ansicht
+        cols = st.columns(3)
+        for i, card in enumerate(all_plant_cards):
+            with cols[i % 3]:
+                if card.image_data:
+                    st.markdown(f"""
+                    <div style="border: 1px solid #ddd; border-radius: 10px; padding: 10px; margin-bottom: 10px;">
+                        <img src="data:image/jpeg;base64,{card.image_data}"
+                             style="width: 100%; border-radius: 8px;">
+                        <p style="font-weight: bold; margin: 5px 0;">{card.answer}</p>
+                        <p style="font-size: 0.8rem; color: #666;">{card.explanation[:50] + '...' if len(card.explanation) > 50 else card.explanation}</p>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+
+# ============================================================
+# 9d. Multiplayer / Lerngruppen Seiten
 # ============================================================
 
 def render_rank_badge(rank_id: str) -> str:
@@ -4627,6 +5018,7 @@ PAGES = {
     "🏠 Übersicht": page_home,
     "📄 Upload & Karten": page_upload_and_generate,
     "🧠 Karteikarten lernen": page_study_cards,
+    "🌿 Bildkarten": page_image_cards,
     "📝 Lückentext (Cloze)": page_cloze_cards,
     "📆 Lernplan & Timeline": page_plan_and_calendar,
     "📊 Auswertung": page_stats,
