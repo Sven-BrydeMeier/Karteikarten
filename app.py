@@ -36,7 +36,7 @@ except ImportError:
 # ============================================================
 
 # App-Version
-APP_VERSION = "2.2.3"
+APP_VERSION = "2.2.4"
 APP_LAST_UPDATE = "2026-01-09"
 
 load_dotenv()  # .env-Datei laden, falls vorhanden
@@ -4222,10 +4222,79 @@ TRUSTED_DOMAINS = {
 }
 
 
+# Blockierte Top-Level-Domains (nicht deutschsprachige Länder)
+BLOCKED_TLDS = {
+    '.cn', '.ru', '.jp', '.kr', '.tw', '.hk', '.th', '.vn', '.id', '.my',
+    '.sg', '.ph', '.in', '.pk', '.bd', '.ir', '.sa', '.ae', '.il', '.tr',
+    '.br', '.mx', '.ar', '.cl', '.co', '.pe', '.ve', '.ua', '.by', '.kz',
+    '.pl', '.cz', '.hu', '.ro', '.bg', '.gr', '.pt', '.es', '.it', '.fr',
+    '.nl', '.be', '.se', '.no', '.dk', '.fi'
+}
+
+# Erlaubte Top-Level-Domains (deutschsprachig + international)
+ALLOWED_TLDS = {
+    '.de', '.at', '.ch', '.li',  # Deutschsprachige Länder
+    '.com', '.org', '.net', '.info', '.eu', '.edu', '.gov'  # International
+}
+
+
+def is_german_text(text: str) -> bool:
+    """
+    Prüft ob ein Text auf Deutsch ist anhand typischer deutscher Wörter.
+    """
+    if not text or len(text) < 50:
+        return False
+
+    text_lower = text.lower()
+
+    # Typische deutsche Wörter und Artikel
+    german_indicators = [
+        ' der ', ' die ', ' das ', ' und ', ' ist ', ' sind ', ' wird ', ' werden ',
+        ' für ', ' mit ', ' bei ', ' auf ', ' aus ', ' nach ', ' über ', ' unter ',
+        ' oder ', ' aber ', ' wenn ', ' weil ', ' dass ', ' einen ', ' einer ', ' einem ',
+        ' nicht ', ' auch ', ' kann ', ' können ', ' haben ', ' wird ', ' diese ',
+        ' mehr ', ' sehr ', ' nur ', ' noch ', ' schon ', ' hier ', ' alle ',
+        'ä', 'ö', 'ü', 'ß'  # Deutsche Umlaute
+    ]
+
+    # Zähle deutsche Indikatoren
+    german_count = sum(1 for indicator in german_indicators if indicator in text_lower)
+
+    # Mindestens 5 deutsche Indikatoren für 500 Zeichen
+    threshold = max(3, len(text) // 200)
+    return german_count >= threshold
+
+
+def is_allowed_domain(url: str) -> bool:
+    """
+    Prüft ob eine URL von einer erlaubten Domain stammt.
+    Blockiert asiatische, osteuropäische und andere nicht-deutschsprachige TLDs.
+    """
+    try:
+        domain = urlparse(url).netloc.lower()
+
+        # Prüfe auf blockierte TLDs
+        for tld in BLOCKED_TLDS:
+            if domain.endswith(tld):
+                return False
+
+        # Wenn erlaubte TLDs definiert, nur diese zulassen
+        for tld in ALLOWED_TLDS:
+            if domain.endswith(tld):
+                return True
+
+        # Unbekannte TLDs blockieren
+        return False
+
+    except Exception:
+        return False
+
+
 def search_web(query: str, num_results: int = 8) -> List[Dict[str, str]]:
     """
     Sucht im Web nach einem Thema und gibt Suchergebnisse zurück.
-    Verwendet nur deutschsprachige Seiten mit HTTPS (keine Domain-Einschränkung).
+    Verwendet nur deutschsprachige Seiten mit HTTPS.
+    Filtert strikt nicht-deutsche Inhalte aus.
 
     Args:
         query: Suchbegriff
@@ -4236,31 +4305,42 @@ def search_web(query: str, num_results: int = 8) -> List[Dict[str, str]]:
     """
     results = []
 
-    # Methode 1: DuckDuckGo Search Library (deutschsprachig, keine Domain-Einschränkung)
-    if DDGS_AVAILABLE and not results:
+    # Methode 1: DuckDuckGo Search Library
+    if DDGS_AVAILABLE:
         try:
             with DDGS() as ddgs:
-                # Suche mit deutscher Region - findet deutschsprachige Inhalte weltweit
                 search_results = list(ddgs.text(
-                    query,  # Originaler Suchbegriff ohne site:-Filter
-                    region="de-de",  # Deutsche Region für deutschsprachige Ergebnisse
+                    query,
+                    region="de-de",
                     safesearch="moderate",
-                    max_results=num_results * 2  # Mehr holen wegen HTTPS-Filter
+                    max_results=num_results * 3  # Mehr holen wegen Filter
                 ))
 
                 for r in search_results:
                     url = r.get("href", r.get("link", ""))
 
-                    # Nur HTTPS-URLs (Sicherheit)
+                    # Nur HTTPS
                     if not url.startswith("https://"):
+                        continue
+
+                    # Domain-Filter (blockiert .cn, .ru, etc.)
+                    if not is_allowed_domain(url):
+                        continue
+
+                    title = r.get("title", "")
+                    snippet = r.get("body", r.get("snippet", ""))
+
+                    # Text muss deutsch sein (Titel + Snippet)
+                    combined_text = f"{title} {snippet}"
+                    if not is_german_text(combined_text) and len(combined_text) > 100:
                         continue
 
                     domain = urlparse(url).netloc.lower()
 
                     results.append({
-                        "title": r.get("title", ""),
+                        "title": title,
                         "url": url,
-                        "snippet": r.get("body", r.get("snippet", "")),
+                        "snippet": snippet,
                         "domain": domain
                     })
 
@@ -4290,7 +4370,12 @@ def search_web(query: str, num_results: int = 8) -> List[Dict[str, str]]:
             for link in soup.find_all('a', class_='result-link'):
                 url = link.get('href', '')
 
+                # Nur HTTPS
                 if not url.startswith('https://'):
+                    continue
+
+                # Domain-Filter
+                if not is_allowed_domain(url):
                     continue
 
                 title = link.get_text(strip=True)
@@ -4298,6 +4383,11 @@ def search_web(query: str, num_results: int = 8) -> List[Dict[str, str]]:
                 # Snippet aus dem nächsten Element
                 snippet_elem = link.find_next('td', class_='result-snippet')
                 snippet = snippet_elem.get_text(strip=True) if snippet_elem else ""
+
+                # Sprachprüfung
+                combined_text = f"{title} {snippet}"
+                if not is_german_text(combined_text) and len(combined_text) > 100:
+                    continue
 
                 if url and title:
                     results.append({
@@ -4316,7 +4406,6 @@ def search_web(query: str, num_results: int = 8) -> List[Dict[str, str]]:
     # Methode 3: Alternative über requests wenn nichts funktioniert
     if len(results) < 3:
         try:
-            # Versuche mit Startpage (datenschutzfreundliche Suche)
             headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                 "Accept-Language": "de-DE,de;q=0.9"
@@ -4332,8 +4421,14 @@ def search_web(query: str, num_results: int = 8) -> List[Dict[str, str]]:
             for result in soup.select('a.result__link, .result a[href^="https://"]'):
                 url = result.get('href', '')
 
+                # Nur HTTPS
                 if not url.startswith('https://'):
                     continue
+
+                # Domain-Filter
+                if not is_allowed_domain(url):
+                    continue
+
                 if 'ecosia.org' in url:
                     continue
 
@@ -4444,6 +4539,11 @@ def fetch_page_content(url: str, max_chars: int = 15000) -> Dict[str, Any]:
             # Auf maximale Länge kürzen
             if len(content) > max_chars:
                 content = content[:max_chars] + "..."
+
+            # WICHTIG: Sprachprüfung - nur deutsche Inhalte akzeptieren
+            if not is_german_text(content):
+                result["error"] = "Inhalt nicht auf Deutsch"
+                return result
 
             result["content"] = content
             result["success"] = True
