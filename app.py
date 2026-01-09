@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Dict, Any, Tuple
 from io import BytesIO
 from collections import defaultdict
+from contextlib import contextmanager
 from urllib.parse import urlparse, urljoin
 
 import streamlit as st
@@ -36,7 +37,7 @@ except ImportError:
 # ============================================================
 
 # App-Version
-APP_VERSION = "2.2.0"
+APP_VERSION = "2.3.0"
 APP_LAST_UPDATE = "2026-01-09"
 
 load_dotenv()  # .env-Datei laden, falls vorhanden
@@ -358,10 +359,22 @@ class UserProfile:
 DB_PATH = "study_app.db"
 
 
+@contextmanager
 def get_db_connection():
+    """
+    Context Manager für Datenbankverbindungen.
+    Stellt sicher, dass Verbindungen immer geschlossen werden.
+    """
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
-    return conn
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def init_db_schema():
@@ -1687,16 +1700,40 @@ def init_state():
         st.session_state.study_plan = None
 
 
+def get_secret(key: str, default: str = "") -> str:
+    """
+    Holt einen API-Key aus verschiedenen Quellen (Priorität):
+    1. Streamlit Secrets (st.secrets) - für Streamlit Cloud
+    2. Umgebungsvariablen (os.getenv) - für lokale Entwicklung
+    3. Default-Wert
+    """
+    # 1. Streamlit Secrets prüfen (Streamlit Cloud)
+    try:
+        if hasattr(st, 'secrets') and key in st.secrets:
+            return st.secrets[key]
+    except Exception:
+        pass
+
+    # 2. Umgebungsvariablen prüfen (lokal / .env)
+    env_value = os.getenv(key, "")
+    if env_value:
+        return env_value
+
+    return default
+
+
 def init_llm_state():
     if "llm_provider" not in st.session_state:
         st.session_state.llm_provider = "openai"  # "openai" oder "anthropic"
     if "openai_api_key" not in st.session_state:
-        # Aus .env vorbelegen, kann im UI überschrieben werden
-        st.session_state.openai_api_key = os.getenv("OPENAI_API_KEY", "")
+        # Aus Streamlit Secrets oder .env vorbelegen
+        st.session_state.openai_api_key = get_secret("OPENAI_API_KEY", "")
     if "anthropic_api_key" not in st.session_state:
-        st.session_state.anthropic_api_key = os.getenv("ANTHROPIC_API_KEY", "")
+        st.session_state.anthropic_api_key = get_secret("ANTHROPIC_API_KEY", "")
     if "llm_connection_status" not in st.session_state:
         st.session_state.llm_connection_status = None
+    if "llm_auto_tested" not in st.session_state:
+        st.session_state.llm_auto_tested = False
     if "current_cards" not in st.session_state:
         st.session_state.current_cards: List[Card] = []
     if "current_card_index" not in st.session_state:
@@ -1705,6 +1742,42 @@ def init_llm_state():
         st.session_state.current_exam = None
     if "study_answer_mode" not in st.session_state:
         st.session_state.study_answer_mode = "Freitext"  # "Freitext" oder "Multiple Choice"
+
+    # Auto-Test der Verbindung beim Start, wenn API-Key vorhanden
+    if not st.session_state.llm_auto_tested:
+        st.session_state.llm_auto_tested = True
+        api_key = st.session_state.openai_api_key if st.session_state.llm_provider == "openai" else st.session_state.anthropic_api_key
+        if api_key and len(api_key) > 10:
+            try:
+                test_llm_connection_silent()
+            except Exception:
+                pass
+
+
+def test_llm_connection_silent():
+    """
+    Stille Verbindungsprüfung ohne Streamlit-Ausgaben.
+    Wird beim App-Start automatisch aufgerufen.
+    """
+    try:
+        client, provider = get_llm_client()
+
+        if provider == "openai":
+            resp = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": "Hi"}],
+                max_tokens=5,
+            )
+            st.session_state.llm_connection_status = "ok"
+        else:
+            resp = client.messages.create(
+                model="claude-3-5-sonnet-20240620",
+                max_tokens=5,
+                messages=[{"role": "user", "content": "Hi"}],
+            )
+            st.session_state.llm_connection_status = "ok"
+    except Exception as e:
+        st.session_state.llm_connection_status = str(e)[:100]
 
 
 def init_gamification_state():
@@ -3544,6 +3617,24 @@ def page_llm_settings():
 
     st.write("Hier wählst du, ob die App über OpenAI (ChatGPT) oder Anthropic (Claude) läuft und kannst den API-Key hinterlegen.")
 
+    # Prüfen ob Secrets von Streamlit Cloud vorhanden sind
+    has_openai_secret = False
+    has_anthropic_secret = False
+    try:
+        if hasattr(st, 'secrets'):
+            has_openai_secret = "OPENAI_API_KEY" in st.secrets
+            has_anthropic_secret = "ANTHROPIC_API_KEY" in st.secrets
+    except Exception:
+        pass
+
+    if has_openai_secret or has_anthropic_secret:
+        st.success("✅ **API-Keys aus Streamlit Cloud Secrets geladen!**")
+        if has_openai_secret:
+            st.caption("• OpenAI API-Key ist in den Secrets hinterlegt")
+        if has_anthropic_secret:
+            st.caption("• Anthropic API-Key ist in den Secrets hinterlegt")
+        st.markdown("---")
+
     provider = st.radio(
         "KI-Provider auswählen",
         ["OpenAI (ChatGPT)", "Anthropic (Claude)"],
@@ -3558,22 +3649,33 @@ def page_llm_settings():
 
     if st.session_state.llm_provider == "openai":
         st.subheader("🔑 OpenAI-API-Key")
-        st.info("Den Key bekommst du im OpenAI-Dashboard unter 'API Keys'.")
-        st.session_state.openai_api_key = st.text_input(
-            "OpenAI API Key",
-            value=st.session_state.openai_api_key,
-            type="password",
-            help="Wird nur in der aktuellen Streamlit-Session gehalten.",
-        )
+        if has_openai_secret:
+            st.success("API-Key ist bereits in den Streamlit Secrets hinterlegt.")
+            # Zeige maskierten Key
+            key_preview = st.session_state.openai_api_key[:8] + "..." if len(st.session_state.openai_api_key) > 8 else "***"
+            st.text(f"Aktiver Key: {key_preview}")
+        else:
+            st.info("Den Key bekommst du im OpenAI-Dashboard unter 'API Keys'.")
+            st.session_state.openai_api_key = st.text_input(
+                "OpenAI API Key",
+                value=st.session_state.openai_api_key,
+                type="password",
+                help="Wird nur in der aktuellen Streamlit-Session gehalten.",
+            )
     else:
         st.subheader("🔑 Anthropic-API-Key")
-        st.info("Den Key bekommst du im Claude-Dashboard unter 'API Keys'.")
-        st.session_state.anthropic_api_key = st.text_input(
-            "Anthropic API Key",
-            value=st.session_state.anthropic_api_key,
-            type="password",
-            help="Wird nur in der aktuellen Streamlit-Session gehalten.",
-        )
+        if has_anthropic_secret:
+            st.success("API-Key ist bereits in den Streamlit Secrets hinterlegt.")
+            key_preview = st.session_state.anthropic_api_key[:8] + "..." if len(st.session_state.anthropic_api_key) > 8 else "***"
+            st.text(f"Aktiver Key: {key_preview}")
+        else:
+            st.info("Den Key bekommst du im Claude-Dashboard unter 'API Keys'.")
+            st.session_state.anthropic_api_key = st.text_input(
+                "Anthropic API Key",
+                value=st.session_state.anthropic_api_key,
+                type="password",
+                help="Wird nur in der aktuellen Streamlit-Session gehalten.",
+            )
 
     if st.button("🔌 Verbindung testen"):
         test_llm_connection()
@@ -4149,87 +4251,264 @@ def display_card_image(image_data: str, caption: str = None):
 # 9c2. Web-Recherche für Karteikarten
 # ============================================================
 
-# Vertrauenswürdige Domains für Fachthemen
+# Vertrauenswürdige Domains für Fachthemen (deutschsprachige Quellen)
 TRUSTED_DOMAINS = {
     "garten": [
         "mein-schoener-garten.de", "gartenjournal.net", "gartenlexikon.de",
         "pflanzen-vielfalt.de", "baumkunde.de", "pflanzenbestimmung.info",
-        "naturadb.de", "floraweb.de", "wikipedia.org", "nabu.de",
-        "lwg.bayern.de", "gartenakademie.rlp.de"
+        "naturadb.de", "floraweb.de", "nabu.de", "gartendialog.de",
+        "lwg.bayern.de", "gartenakademie.rlp.de", "hausgarten.net",
+        "pflanzmich.de", "baldur-garten.de", "gartentipps.de",
+        "plantura.garden", "native-plants.de", "lubera.de"
     ],
     "handwerk": [
         "bauen.de", "selbst.de", "hornbach.de", "obi.de",
-        "bauhaus.info", "wikipedia.org", "handwerk.de"
+        "bauhaus.info", "handwerk.de", "baumarkt.de",
+        "heimwerker.de", "sanier.de", "hausjournal.net"
     ],
     "allgemein": [
         "wikipedia.org", "spektrum.de", "planet-wissen.de",
-        "geo.de", "wissen.de"
+        "geo.de", "wissen.de", "br.de", "ndr.de", "swr.de"
     ]
 }
 
 
-def search_web(query: str, num_results: int = 8, region: str = "de-de") -> List[Dict[str, str]]:
+# Blockierte Top-Level-Domains (nicht deutschsprachige Länder)
+BLOCKED_TLDS = {
+    '.cn', '.ru', '.jp', '.kr', '.tw', '.hk', '.th', '.vn', '.id', '.my',
+    '.sg', '.ph', '.in', '.pk', '.bd', '.ir', '.sa', '.ae', '.il', '.tr',
+    '.br', '.mx', '.ar', '.cl', '.co', '.pe', '.ve', '.ua', '.by', '.kz',
+    '.pl', '.cz', '.hu', '.ro', '.bg', '.gr', '.pt', '.es', '.it', '.fr',
+    '.nl', '.be', '.se', '.no', '.dk', '.fi'
+}
+
+# Erlaubte Top-Level-Domains (deutschsprachig + international)
+ALLOWED_TLDS = {
+    '.de', '.at', '.ch', '.li',  # Deutschsprachige Länder
+    '.com', '.org', '.net', '.info', '.eu', '.edu', '.gov'  # International
+}
+
+
+def is_german_text(text: str) -> bool:
+    """
+    Prüft ob ein Text auf Deutsch ist anhand typischer deutscher Wörter.
+    """
+    if not text or len(text) < 50:
+        return False
+
+    text_lower = text.lower()
+
+    # Typische deutsche Wörter und Artikel
+    german_indicators = [
+        ' der ', ' die ', ' das ', ' und ', ' ist ', ' sind ', ' wird ', ' werden ',
+        ' für ', ' mit ', ' bei ', ' auf ', ' aus ', ' nach ', ' über ', ' unter ',
+        ' oder ', ' aber ', ' wenn ', ' weil ', ' dass ', ' einen ', ' einer ', ' einem ',
+        ' nicht ', ' auch ', ' kann ', ' können ', ' haben ', ' wird ', ' diese ',
+        ' mehr ', ' sehr ', ' nur ', ' noch ', ' schon ', ' hier ', ' alle ',
+        'ä', 'ö', 'ü', 'ß'  # Deutsche Umlaute
+    ]
+
+    # Zähle deutsche Indikatoren
+    german_count = sum(1 for indicator in german_indicators if indicator in text_lower)
+
+    # Mindestens 5 deutsche Indikatoren für 500 Zeichen
+    threshold = max(3, len(text) // 200)
+    return german_count >= threshold
+
+
+def is_allowed_domain(url: str) -> bool:
+    """
+    Prüft ob eine URL von einer erlaubten Domain stammt.
+    Blockiert asiatische, osteuropäische und andere nicht-deutschsprachige TLDs.
+    """
+    try:
+        domain = urlparse(url).netloc.lower()
+
+        # Prüfe auf blockierte TLDs
+        for tld in BLOCKED_TLDS:
+            if domain.endswith(tld):
+                return False
+
+        # Wenn erlaubte TLDs definiert, nur diese zulassen
+        for tld in ALLOWED_TLDS:
+            if domain.endswith(tld):
+                return True
+
+        # Unbekannte TLDs blockieren
+        return False
+
+    except Exception:
+        return False
+
+
+def search_web(query: str, num_results: int = 8) -> List[Dict[str, str]]:
     """
     Sucht im Web nach einem Thema und gibt Suchergebnisse zurück.
+    Verwendet nur deutschsprachige Seiten mit HTTPS.
+    Filtert strikt nicht-deutsche Inhalte aus.
 
     Args:
         query: Suchbegriff
         num_results: Anzahl der gewünschten Ergebnisse
-        region: Region für die Suche (Standard: deutsch)
 
     Returns:
         Liste von Dictionaries mit 'title', 'url', 'snippet'
     """
     results = []
 
+    # Methode 1: DuckDuckGo Search Library
     if DDGS_AVAILABLE:
         try:
             with DDGS() as ddgs:
-                search_results = ddgs.text(
+                search_results = list(ddgs.text(
                     query,
-                    region=region,
-                    max_results=num_results
-                )
-                for r in search_results:
-                    results.append({
-                        "title": r.get("title", ""),
-                        "url": r.get("href", r.get("link", "")),
-                        "snippet": r.get("body", r.get("snippet", ""))
-                    })
-        except Exception as e:
-            st.warning(f"DuckDuckGo-Suche fehlgeschlagen: {e}")
+                    region="de-de",
+                    safesearch="moderate",
+                    max_results=num_results * 3  # Mehr holen wegen Filter
+                ))
 
-    # Fallback: Einfache Google-Suche über requests (nur für Notfälle)
-    if not results:
+                for r in search_results:
+                    url = r.get("href", r.get("link", ""))
+
+                    # Nur HTTPS
+                    if not url.startswith("https://"):
+                        continue
+
+                    # Domain-Filter (blockiert .cn, .ru, etc.)
+                    if not is_allowed_domain(url):
+                        continue
+
+                    title = r.get("title", "")
+                    snippet = r.get("body", r.get("snippet", ""))
+
+                    # Text muss deutsch sein (Titel + Snippet)
+                    combined_text = f"{title} {snippet}"
+                    if not is_german_text(combined_text) and len(combined_text) > 100:
+                        continue
+
+                    domain = urlparse(url).netloc.lower()
+
+                    results.append({
+                        "title": title,
+                        "url": url,
+                        "snippet": snippet,
+                        "domain": domain
+                    })
+
+                    if len(results) >= num_results:
+                        break
+
+        except Exception as e:
+            st.warning(f"DuckDuckGo-Suche: {e}")
+
+    # Methode 2: Direkte DuckDuckGo HTML-Suche als Fallback
+    if len(results) < 3:
         try:
             headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept-Language": "de-DE,de;q=0.9"
             }
-            search_url = f"https://html.duckduckgo.com/html/?q={requests.utils.quote(query)}"
-            response = requests.get(search_url, headers=headers, timeout=10)
+
+            # DuckDuckGo Lite mit deutscher Region (kl=de-de)
+            encoded_query = requests.utils.quote(query)
+            search_url = f"https://lite.duckduckgo.com/lite/?q={encoded_query}&kl=de-de"
+
+            response = requests.get(search_url, headers=headers, timeout=15)
+            response.encoding = 'utf-8'
             soup = BeautifulSoup(response.text, 'html.parser')
 
-            for result in soup.select('.result')[:num_results]:
-                title_elem = result.select_one('.result__title')
-                link_elem = result.select_one('.result__url')
-                snippet_elem = result.select_one('.result__snippet')
+            # Links aus der Lite-Version extrahieren
+            for link in soup.find_all('a', class_='result-link'):
+                url = link.get('href', '')
 
-                if title_elem and link_elem:
-                    url = link_elem.get('href', '')
-                    if url.startswith('//duckduckgo.com/l/?uddg='):
-                        # URL dekodieren
-                        import urllib.parse
-                        url = urllib.parse.unquote(url.split('uddg=')[1].split('&')[0])
+                # Nur HTTPS
+                if not url.startswith('https://'):
+                    continue
 
+                # Domain-Filter
+                if not is_allowed_domain(url):
+                    continue
+
+                title = link.get_text(strip=True)
+
+                # Snippet aus dem nächsten Element
+                snippet_elem = link.find_next('td', class_='result-snippet')
+                snippet = snippet_elem.get_text(strip=True) if snippet_elem else ""
+
+                # Sprachprüfung
+                combined_text = f"{title} {snippet}"
+                if not is_german_text(combined_text) and len(combined_text) > 100:
+                    continue
+
+                if url and title:
                     results.append({
-                        "title": title_elem.get_text(strip=True),
+                        "title": title,
                         "url": url,
-                        "snippet": snippet_elem.get_text(strip=True) if snippet_elem else ""
+                        "snippet": snippet,
+                        "domain": urlparse(url).netloc.lower()
                     })
-        except Exception as e:
-            st.warning(f"Fallback-Suche fehlgeschlagen: {e}")
 
-    return results
+                if len(results) >= num_results:
+                    break
+
+        except Exception as e:
+            st.warning(f"Fallback-Suche: {e}")
+
+    # Methode 3: Alternative über requests wenn nichts funktioniert
+    if len(results) < 3:
+        try:
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Accept-Language": "de-DE,de;q=0.9"
+            }
+
+            # Einfache Suche über ecosia (deutsch-freundlich)
+            encoded_query = requests.utils.quote(query)
+            search_url = f"https://www.ecosia.org/search?q={encoded_query}&l=de"
+
+            response = requests.get(search_url, headers=headers, timeout=15)
+            soup = BeautifulSoup(response.text, 'html.parser')
+
+            for result in soup.select('a.result__link, .result a[href^="https://"]'):
+                url = result.get('href', '')
+
+                # Nur HTTPS
+                if not url.startswith('https://'):
+                    continue
+
+                # Domain-Filter
+                if not is_allowed_domain(url):
+                    continue
+
+                if 'ecosia.org' in url:
+                    continue
+
+                title = result.get_text(strip=True)
+
+                if url and title and len(title) > 5:
+                    results.append({
+                        "title": title[:100],
+                        "url": url,
+                        "snippet": "",
+                        "domain": urlparse(url).netloc.lower()
+                    })
+
+                if len(results) >= num_results:
+                    break
+
+        except Exception as e:
+            pass  # Stille Fehlerbehandlung für Fallback
+
+    # Duplikate entfernen (basierend auf Domain)
+    seen_domains = set()
+    unique_results = []
+    for r in results:
+        domain = r.get("domain", "")
+        if domain not in seen_domains:
+            seen_domains.add(domain)
+            unique_results.append(r)
+
+    return unique_results[:num_results]
 
 
 def fetch_page_content(url: str, max_chars: int = 15000) -> Dict[str, Any]:
@@ -4311,6 +4590,11 @@ def fetch_page_content(url: str, max_chars: int = 15000) -> Dict[str, Any]:
             # Auf maximale Länge kürzen
             if len(content) > max_chars:
                 content = content[:max_chars] + "..."
+
+            # WICHTIG: Sprachprüfung - nur deutsche Inhalte akzeptieren
+            if not is_german_text(content):
+                result["error"] = "Inhalt nicht auf Deutsch"
+                return result
 
             result["content"] = content
             result["success"] = True
@@ -4447,19 +4731,22 @@ Erstelle jetzt {num_cards} Lernkarten basierend auf diesen Quellen."""
 
 
 def page_web_research():
-    """Seite für die Erstellung von Karteikarten durch Web-Recherche."""
-    st.title("🌐 Web-Recherche Karteikarten")
+    """Seite für die Erstellung von Karteikarten durch KI-Recherche."""
+    st.title("🤖 KI-Recherche Karteikarten")
 
     st.write("""
-    Erstelle Karteikarten zu jedem Thema – die KI recherchiert automatisch im Internet,
-    prüft mehrere Quellen und erstellt fundierte Lernkarten.
+    Erstelle Karteikarten zu jedem Thema – die KI recherchiert aus ihrem Fachwissen,
+    prüft Fakten aus mehreren Quellen und erstellt fundierte, verifizierte Lernkarten.
     """)
 
-    # Warnhinweis
-    st.info("""
-    **Hinweis:** Die KI sucht Informationen aus dem Internet und versucht, diese zu verifizieren.
-    Dennoch solltest du wichtige Fakten für Prüfungen immer mit deinen Lehrmaterialien abgleichen.
-    """)
+    # KI-Status prüfen
+    if st.session_state.get("llm_connection_status") != "ok":
+        api_key = st.session_state.get("openai_api_key", "")
+        if not api_key or len(api_key) < 10:
+            st.error("⚠️ Kein API-Key konfiguriert. Bitte zuerst in den **KI-Einstellungen** einen API-Key hinterlegen.")
+            return
+
+    st.success("✅ KI ist verbunden und bereit für die Recherche.")
 
     # Deck auswählen oder erstellen
     decks = db_get_decks(st.session_state.user_id)
@@ -4479,8 +4766,11 @@ def page_web_research():
             "Pflanzenkunde",
             "Handwerk",
             "Biologie",
-            "Geographie",
+            "Medizin",
+            "Rechtswissenschaften",
             "Geschichte",
+            "Geographie",
+            "Informatik",
             "Allgemeinwissen",
             "Andere"
         ], key="web_subject")
@@ -4512,174 +4802,197 @@ def page_web_research():
 
     st.markdown("---")
 
-    # Suchthema eingeben
-    st.subheader("🔍 Thema für Web-Recherche")
+    # Thema eingeben
+    st.subheader("📚 Thema für KI-Recherche")
 
     # Beispielthemen
     example_topics = {
         "Garten- und Landschaftsbau": [
             "Stauden für schattige Standorte",
             "Pflasterarbeiten Verlegemuster",
-            "Bodendecker für Hangbefestigung",
-            "Heckenpflanzen immergrün",
-            "Rasenanlage und Rasenpflege"
+            "Bodendecker für Hangbefestigung"
         ],
         "Pflanzenkunde": [
-            "Lavendel Arten und Pflege",
-            "Heimische Wildblumen Deutschland",
-            "Giftpflanzen im Garten erkennen",
-            "Obstbaumschnitt Grundlagen",
-            "Kräuter für die Küche"
+            "Heimische Laubbäume bestimmen",
+            "Giftpflanzen im Garten",
+            "Kräuter und ihre Verwendung"
         ],
         "Handwerk": [
             "Holzverbindungen Arten",
             "Mauerwerk Verbände",
-            "Dachziegel Arten",
-            "Elektroinstallation Grundlagen",
-            "Sanitär Grundlagen"
+            "Werkzeugkunde Grundlagen"
         ]
     }
 
-    # Beispielvorschläge anzeigen
-    examples = example_topics.get(subject, example_topics["Pflanzenkunde"])
-    st.caption(f"Beispiele: {', '.join(examples[:3])}")
+    examples = example_topics.get(subject, ["Grundlagen des Fachs", "Wichtige Begriffe", "Praxiswissen"])
+    st.caption(f"Beispiele: {', '.join(examples)}")
 
     search_topic = st.text_input(
-        "Suchthema eingeben",
-        placeholder="z.B. Stauden für sonnige Standorte",
-        help="Gib ein konkretes Thema ein, zu dem du Lernkarten erstellen möchtest."
+        "Thema eingeben",
+        placeholder="z.B. Heimische Laubbäume bestimmen und erkennen",
+        help="Die KI recherchiert zu diesem Thema und erstellt verifizierte Karteikarten."
     )
 
     # Erweiterte Optionen
     with st.expander("⚙️ Erweiterte Optionen"):
         col1, col2 = st.columns(2)
         with col1:
-            num_sources = st.slider("Anzahl Quellen", 3, 10, 5, help="Mehr Quellen = bessere Verifikation, aber längere Ladezeit")
             num_cards = st.slider("Anzahl Karten", 5, 50, 20)
+            difficulty = st.selectbox("Schwierigkeitsgrad", [
+                "Anfänger",
+                "Fortgeschritten",
+                "Examensniveau",
+                "Experte"
+            ])
         with col2:
-            card_format = st.selectbox("Kartenformat", [
-                ("Gemischt (MC + Freitext)", "mixed"),
-                ("Nur Multiple-Choice", "mc_only"),
-                ("Nur Freitext", "freetext_only")
-            ], format_func=lambda x: x[0])[1]
-
-            verify_sources = st.checkbox("Quellen verifizieren", value=True,
-                help="Bevorzugt vertrauenswürdige Fachseiten")
+            card_focus = st.selectbox("Schwerpunkt", [
+                "Gemischt (alle Typen)",
+                "Definitionen & Begriffe",
+                "Bestimmung & Erkennung",
+                "Prozesse & Abläufe",
+                "Typische Fehler & Verwechslungen"
+            ])
+            include_images = st.checkbox("Bildkarten-Vorschläge", value=True,
+                help="KI schlägt Bilder zur visuellen Bestimmung vor")
 
     st.markdown("---")
 
     # Recherche starten
-    if st.button("🚀 Recherche starten & Karten erstellen", type="primary", disabled=not search_topic):
+    if st.button("🚀 KI-Recherche starten", type="primary", disabled=not search_topic):
         if not search_topic:
-            st.error("Bitte gib ein Suchthema ein.")
+            st.error("Bitte gib ein Thema ein.")
             return
-
-        # Kategorisierung für Quellenprüfung
-        category = "garten" if subject in ["Garten- und Landschaftsbau", "Pflanzenkunde"] else \
-                   "handwerk" if subject == "Handwerk" else "allgemein"
 
         progress_bar = st.progress(0)
         status_text = st.empty()
 
         try:
-            # Schritt 1: Web-Suche
-            status_text.text("🔍 Suche im Internet...")
-            progress_bar.progress(10)
-
-            # Erweiterte Suchanfrage für bessere Ergebnisse
-            enhanced_query = f"{search_topic} {subject} Fachwissen"
-            search_results = search_web(enhanced_query, num_results=num_sources + 3)
-
-            if not search_results:
-                st.error("Keine Suchergebnisse gefunden. Bitte versuche einen anderen Suchbegriff.")
-                return
-
-            st.write(f"**{len(search_results)} Suchergebnisse gefunden**")
+            status_text.text("🤖 KI recherchiert und prüft Fakten...")
             progress_bar.progress(20)
 
-            # Schritt 2: Inhalte laden
-            status_text.text("📥 Lade Inhalte von Webseiten...")
+            # KI-Prompt erstellen
+            focus_map = {
+                "Gemischt (alle Typen)": "Mischung aus Definitionen, Prozessen, Bestimmung und typischen Fehlern",
+                "Definitionen & Begriffe": "Definitionen und Fachbegriffe",
+                "Bestimmung & Erkennung": "Bestimmung, Erkennung und Unterscheidungsmerkmale",
+                "Prozesse & Abläufe": "Prozesse, Abläufe und Arbeitsschritte",
+                "Typische Fehler & Verwechslungen": "Typische Fehler, Verwechslungen und häufige Irrtümer"
+            }
 
-            sources_with_content = []
-            source_status = st.empty()
+            image_instruction = """
+BILDKARTEN (5 Stück):
+Erstelle zusätzlich 5 Bildkarten für visuelle Bestimmung:
+- Beschreibe, welches Bild benötigt wird (z.B. "Foto einer Eiche im Herbst")
+- Liste 3-5 Erkennungsmerkmale auf dem Bild
+- Nenne typische Verwechslungen
+- Setze "card_type": "image_suggestion"
+""" if include_images else ""
 
-            for i, result in enumerate(search_results):
-                if len(sources_with_content) >= num_sources:
-                    break
+            system_prompt = f"""Du bist ein erfahrener „Karteikarten-Redakteur + Faktenprüfer" für das Fach {subject}.
 
-                url = result.get("url", "")
-                if not url:
-                    continue
+DEINE AUFGABE:
+Erstelle {num_cards} hochwertige, verifizierte Lernkarten zum Thema.
 
-                source_status.text(f"Lade: {result.get('title', url)[:50]}...")
+WICHTIGE REGELN FÜR QUELLEN & VERIFIKATION:
+1) Nutze Fachwissen aus zuverlässigen deutschsprachigen Quellen:
+   - Universitäten, Hochschulen, Forschungsinstitute
+   - Behörden, öffentliche Einrichtungen
+   - Fachgesellschaften, Verbände
+   - Botanische Gärten, Museen
+   - Etablierte Fachverlage, Fachportale
 
-                # Inhalt laden
-                page_data = fetch_page_content(url)
+2) Verifikation:
+   - Jede zentrale Aussage muss durch dein Fachwissen gestützt sein
+   - Bei unsicheren Fakten: Als "nicht vollständig verifiziert" kennzeichnen
+   - Keine Halluzination: Bei Unklarheit explizit sagen
 
-                if page_data["success"] and len(page_data["content"]) > 200:
-                    # Vertrauenswürdigkeit prüfen
-                    is_trusted, domain = is_trusted_source(url, category)
+3) Sprache: Deutsch
 
-                    sources_with_content.append({
-                        "title": page_data["title"] or result.get("title", ""),
-                        "url": url,
-                        "content": page_data["content"],
-                        "domain": domain,
-                        "trusted": is_trusted,
-                        "snippet": result.get("snippet", "")
-                    })
+KARTENFORMAT:
+- Niveau: {difficulty}
+- Schwerpunkt: {focus_map.get(card_focus, card_focus)}
+- Atomare Fragen mit präzisen Antworten
+- Mix aus: Freitext (Q/A), Multiple-Choice (mit 4 Optionen), Lückentext
 
-                progress_bar.progress(20 + int(40 * (i + 1) / len(search_results)))
-                time.sleep(0.5)  # Rate-Limiting
+{image_instruction}
 
-            source_status.empty()
+AUSGABEFORMAT (nur JSON-Array, keine Erklärungen):
+[
+  {{
+    "question": "Frage hier",
+    "answer": "Antwort hier",
+    "explanation": "Erklärung mit Quellenhinweis (z.B. 'Laut Fachliteratur...')",
+    "choices": ["Option A", "Option B", "Option C", "Option D"],
+    "correct_choice_index": 0,
+    "difficulty": 3,
+    "verification": "hoch/mittel/niedrig",
+    "tags": ["tag1", "tag2"],
+    "card_type": "standard"
+  }},
+  {{
+    "question": "Freitext-Frage ohne MC",
+    "answer": "Antwort",
+    "explanation": "Erklärung",
+    "choices": null,
+    "correct_choice_index": null,
+    "difficulty": 2,
+    "verification": "hoch",
+    "tags": ["tag1"],
+    "card_type": "standard"
+  }}
+]
 
-            if len(sources_with_content) < 2:
-                st.error("Nicht genügend Inhalte gefunden. Bitte versuche einen anderen Suchbegriff.")
-                return
+KRITISCH für Multiple-Choice:
+- "choices" muss 4 VOLLSTÄNDIGE Antworttexte enthalten
+- FALSCH: ["A", "B", "C", "D"]
+- RICHTIG: ["Eiche", "Buche", "Birke", "Ahorn"]
 
-            # Quellen anzeigen
-            st.subheader("📚 Gefundene Quellen")
-            for src in sources_with_content:
-                trust_badge = "✅ Vertrauenswürdig" if src["trusted"] else "⚠️ Nicht verifiziert"
-                st.markdown(f"- [{src['title'][:60]}...]({src['url']}) ({src['domain']}) - {trust_badge}")
+Erstelle jetzt {num_cards} Karten zum Thema."""
 
-            progress_bar.progress(60)
+            user_prompt = f"""THEMA: {search_topic}
+FACHBEREICH: {subject}
+NIVEAU: {difficulty}
+SCHWERPUNKT: {focus_map.get(card_focus, card_focus)}
+ANZAHL: {num_cards} Karten
 
-            # Schritt 3: Karten generieren
-            status_text.text("🤖 KI generiert Karteikarten aus den Quellen...")
+Beginne jetzt mit der Erstellung der verifizierten Karteikarten."""
 
-            # Sortiere Quellen: Vertrauenswürdige zuerst
-            if verify_sources:
-                sources_with_content.sort(key=lambda x: (not x["trusted"], -len(x["content"])))
+            progress_bar.progress(40)
+            status_text.text("🧠 KI erstellt verifizierte Karteikarten...")
 
-            raw_response = generate_cards_from_web_content(
-                topic=search_topic,
-                sources=sources_with_content,
-                num_cards=num_cards,
-                card_format=card_format,
-                subject=subject
-            )
+            # LLM aufrufen
+            max_tokens = min(4096 + (num_cards * 200), 16000)
+            raw_response = call_llm(system_prompt, user_prompt, max_tokens=max_tokens)
 
-            progress_bar.progress(85)
+            progress_bar.progress(80)
             status_text.text("💾 Speichere Karteikarten...")
 
             # JSON parsen
             json_match = re.search(r'\[.*\]', raw_response, re.DOTALL)
             if not json_match:
                 st.error("Fehler beim Parsen der KI-Antwort.")
-                st.code(raw_response[:500])
+                with st.expander("Debug-Info"):
+                    st.code(raw_response[:1000])
                 return
 
             cards_data = json.loads(json_match.group())
 
             # Karten speichern
             saved_count = 0
+            image_cards = 0
             for card_data in cards_data:
                 try:
-                    # Quellen als Teil der Erklärung hinzufügen
                     explanation = card_data.get("explanation", "")
-                    source_note = f"\n\n📚 Quellen: Web-Recherche zu '{search_topic}'"
+                    verification = card_data.get("verification", "mittel")
+                    verification_note = f"\n\n✅ Verifikation: {verification}"
+
+                    tags = card_data.get("tags", [])
+                    if isinstance(tags, list):
+                        tags = tags + ["ki-recherche"]
+                    else:
+                        tags = ["ki-recherche"]
+
+                    card_type = card_data.get("card_type", "standard")
 
                     card = Card(
                         id=0,
@@ -4688,16 +5001,19 @@ def page_web_research():
                         subject=subject,
                         question=card_data.get("question", ""),
                         answer=card_data.get("answer", ""),
-                        explanation=explanation + source_note,
+                        explanation=explanation + verification_note,
                         choices=card_data.get("choices"),
                         correct_choice_index=card_data.get("correct_choice_index"),
                         due_date=dt.date.today(),
-                        tags=["web-recherche", search_topic.lower().replace(" ", "-")[:20]]
+                        tags=tags,
+                        card_type=card_type
                     )
 
                     if card.question and card.answer:
                         db_insert_card(card)
                         saved_count += 1
+                        if card_type == "image_suggestion":
+                            image_cards += 1
                 except Exception as e:
                     st.warning(f"Karte übersprungen: {e}")
 
@@ -4710,8 +5026,8 @@ def page_web_research():
 
                 Die Karten wurden im Deck **{deck.name}** gespeichert.
 
-                📊 Quellen: {len(sources_with_content)} Webseiten analysiert
-                ✅ Davon vertrauenswürdig: {sum(1 for s in sources_with_content if s['trusted'])}
+                📊 Davon mit Bildvorschlägen: {image_cards}
+                🎯 Niveau: {difficulty}
                 """)
                 st.balloons()
 
@@ -4725,21 +5041,22 @@ def page_web_research():
         except Exception as e:
             st.error(f"Fehler bei der Verarbeitung: {e}")
             import traceback
-            st.code(traceback.format_exc())
+            with st.expander("Debug-Info"):
+                st.code(traceback.format_exc())
 
-    # Beispiel-Schnellauswahl
+    # Schnellstart-Themen
     st.markdown("---")
     st.subheader("💡 Schnellstart: Beliebte Themen")
 
     col1, col2, col3 = st.columns(3)
 
     popular_topics = [
-        ("🌸 Frühjahrsblüher", "Frühjahrsblüher Zwiebelpflanzen"),
-        ("🌿 Kräutergarten", "Küchenkräuter Anbau Verwendung"),
-        ("🪨 Natursteinmauer", "Natursteinmauer bauen Trockenmauer"),
-        ("🌳 Obstbäume", "Obstbäume Sorten Schnitt Pflege"),
-        ("🌺 Staudenbeete", "Staudenbeete anlegen planen"),
-        ("🏡 Rasenpflege", "Rasen anlegen pflegen mähen")
+        ("🌳 Laubbäume", "Heimische Laubbäume bestimmen"),
+        ("🌿 Stauden", "Stauden für verschiedene Standorte"),
+        ("🔧 Werkzeuge", "Gartenwerkzeuge und ihre Verwendung"),
+        ("🌺 Blumen", "Gartenblumen Arten und Pflege"),
+        ("🪨 Pflaster", "Pflasterarbeiten und Verlegemuster"),
+        ("🌱 Bodenkunde", "Bodenarten und Bodenverbesserung")
     ]
 
     for i, (label, topic) in enumerate(popular_topics):
@@ -4749,10 +5066,8 @@ def page_web_research():
                 st.session_state["quick_topic"] = topic
                 st.rerun()
 
-    # Quick-Topic verarbeiten
     if "quick_topic" in st.session_state:
-        st.info(f"Thema vorausgewählt: **{st.session_state['quick_topic']}**")
-        st.caption("Gib das Thema oben ein oder passe es an.")
+        st.info(f"💡 Thema vorausgewählt: **{st.session_state['quick_topic']}** - Trage es oben ein!")
 
 
 def page_image_cards():
@@ -5638,7 +5953,7 @@ def render_challenges_section():
 PAGES = {
     "🏠 Übersicht": page_home,
     "📄 Upload & Karten": page_upload_and_generate,
-    "🌐 Web-Recherche": page_web_research,
+    "🤖 KI-Recherche": page_web_research,
     "🧠 Karteikarten lernen": page_study_cards,
     "🌿 Bildkarten": page_image_cards,
     "📝 Lückentext (Cloze)": page_cloze_cards,
@@ -5656,6 +5971,49 @@ PAGES = {
 }
 
 st.sidebar.title("Navigation")
+
+# KI-Status Anzeige (Lampe)
+def render_ki_status():
+    """Zeigt den KI-Verbindungsstatus als farbige Lampe an."""
+    status = st.session_state.get("llm_connection_status")
+    provider = st.session_state.get("llm_provider", "openai")
+    provider_name = "OpenAI" if provider == "openai" else "Claude"
+
+    if status == "ok":
+        # Grün - Verbunden
+        st.sidebar.markdown(f"""
+        <div style="display: flex; align-items: center; padding: 8px; background: #d4edda; border-radius: 8px; margin-bottom: 10px;">
+            <span style="font-size: 20px; margin-right: 8px;">🟢</span>
+            <span style="color: #155724; font-size: 14px;"><b>KI verbunden</b><br><small>{provider_name}</small></span>
+        </div>
+        """, unsafe_allow_html=True)
+    elif status is None:
+        # Grau - Nicht getestet
+        api_key = st.session_state.get("openai_api_key", "") if provider == "openai" else st.session_state.get("anthropic_api_key", "")
+        if api_key and len(api_key) > 10:
+            st.sidebar.markdown(f"""
+            <div style="display: flex; align-items: center; padding: 8px; background: #fff3cd; border-radius: 8px; margin-bottom: 10px;">
+                <span style="font-size: 20px; margin-right: 8px;">🟡</span>
+                <span style="color: #856404; font-size: 14px;"><b>KI bereit</b><br><small>Nicht getestet</small></span>
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            st.sidebar.markdown(f"""
+            <div style="display: flex; align-items: center; padding: 8px; background: #e2e3e5; border-radius: 8px; margin-bottom: 10px;">
+                <span style="font-size: 20px; margin-right: 8px;">⚪</span>
+                <span style="color: #6c757d; font-size: 14px;"><b>Kein API-Key</b><br><small>→ KI-Einstellungen</small></span>
+            </div>
+            """, unsafe_allow_html=True)
+    else:
+        # Rot - Fehler
+        st.sidebar.markdown(f"""
+        <div style="display: flex; align-items: center; padding: 8px; background: #f8d7da; border-radius: 8px; margin-bottom: 10px;">
+            <span style="font-size: 20px; margin-right: 8px;">🔴</span>
+            <span style="color: #721c24; font-size: 14px;"><b>KI-Fehler</b><br><small>→ KI-Einstellungen</small></span>
+        </div>
+        """, unsafe_allow_html=True)
+
+render_ki_status()
 
 # Gamification in Sidebar anzeigen
 render_gamification_header()
