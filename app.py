@@ -5032,7 +5032,12 @@ Beginne jetzt mit der Erstellung der verifizierten Karteikarten."""
                 st.balloons()
 
                 # XP vergeben
-                award_xp("cards_created", saved_count)
+                stats = st.session_state.user_stats
+                if stats:
+                    xp_earned = saved_count * XP_PER_CORRECT
+                    award_xp(stats, xp_earned)
+                    db_update_user_stats(stats)
+                    st.info(f"🎮 +{xp_earned} XP verdient!")
             else:
                 st.error("Keine Karten konnten erstellt werden.")
 
