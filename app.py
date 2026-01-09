@@ -6,10 +6,13 @@ import datetime as dt
 import random
 import base64
 import hashlib
+import time
+import requests
 from dataclasses import dataclass, field
 from typing import List, Optional, Dict, Any, Tuple
 from io import BytesIO
 from collections import defaultdict
+from urllib.parse import urlparse, urljoin
 
 import streamlit as st
 from openai import OpenAI, RateLimitError as OpenAIRateLimitError, APIError as OpenAIAPIError
@@ -19,14 +22,22 @@ import pdfplumber
 from docx import Document
 import pytesseract
 from dotenv import load_dotenv
+from bs4 import BeautifulSoup
+
+# Web-Recherche (optional, mit Fallback)
+try:
+    from duckduckgo_search import DDGS
+    DDGS_AVAILABLE = True
+except ImportError:
+    DDGS_AVAILABLE = False
 
 # ============================================================
 # 0. Grund-Konfiguration Streamlit & .env
 # ============================================================
 
 # App-Version
-APP_VERSION = "2.1.6"
-APP_LAST_UPDATE = "2026-01-05"
+APP_VERSION = "2.2.0"
+APP_LAST_UPDATE = "2026-01-09"
 
 load_dotenv()  # .env-Datei laden, falls vorhanden
 
@@ -4134,6 +4145,616 @@ def display_card_image(image_data: str, caption: str = None):
         """, unsafe_allow_html=True)
 
 
+# ============================================================
+# 9c2. Web-Recherche für Karteikarten
+# ============================================================
+
+# Vertrauenswürdige Domains für Fachthemen
+TRUSTED_DOMAINS = {
+    "garten": [
+        "mein-schoener-garten.de", "gartenjournal.net", "gartenlexikon.de",
+        "pflanzen-vielfalt.de", "baumkunde.de", "pflanzenbestimmung.info",
+        "naturadb.de", "floraweb.de", "wikipedia.org", "nabu.de",
+        "lwg.bayern.de", "gartenakademie.rlp.de"
+    ],
+    "handwerk": [
+        "bauen.de", "selbst.de", "hornbach.de", "obi.de",
+        "bauhaus.info", "wikipedia.org", "handwerk.de"
+    ],
+    "allgemein": [
+        "wikipedia.org", "spektrum.de", "planet-wissen.de",
+        "geo.de", "wissen.de"
+    ]
+}
+
+
+def search_web(query: str, num_results: int = 8, region: str = "de-de") -> List[Dict[str, str]]:
+    """
+    Sucht im Web nach einem Thema und gibt Suchergebnisse zurück.
+
+    Args:
+        query: Suchbegriff
+        num_results: Anzahl der gewünschten Ergebnisse
+        region: Region für die Suche (Standard: deutsch)
+
+    Returns:
+        Liste von Dictionaries mit 'title', 'url', 'snippet'
+    """
+    results = []
+
+    if DDGS_AVAILABLE:
+        try:
+            with DDGS() as ddgs:
+                search_results = ddgs.text(
+                    query,
+                    region=region,
+                    max_results=num_results
+                )
+                for r in search_results:
+                    results.append({
+                        "title": r.get("title", ""),
+                        "url": r.get("href", r.get("link", "")),
+                        "snippet": r.get("body", r.get("snippet", ""))
+                    })
+        except Exception as e:
+            st.warning(f"DuckDuckGo-Suche fehlgeschlagen: {e}")
+
+    # Fallback: Einfache Google-Suche über requests (nur für Notfälle)
+    if not results:
+        try:
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            }
+            search_url = f"https://html.duckduckgo.com/html/?q={requests.utils.quote(query)}"
+            response = requests.get(search_url, headers=headers, timeout=10)
+            soup = BeautifulSoup(response.text, 'html.parser')
+
+            for result in soup.select('.result')[:num_results]:
+                title_elem = result.select_one('.result__title')
+                link_elem = result.select_one('.result__url')
+                snippet_elem = result.select_one('.result__snippet')
+
+                if title_elem and link_elem:
+                    url = link_elem.get('href', '')
+                    if url.startswith('//duckduckgo.com/l/?uddg='):
+                        # URL dekodieren
+                        import urllib.parse
+                        url = urllib.parse.unquote(url.split('uddg=')[1].split('&')[0])
+
+                    results.append({
+                        "title": title_elem.get_text(strip=True),
+                        "url": url,
+                        "snippet": snippet_elem.get_text(strip=True) if snippet_elem else ""
+                    })
+        except Exception as e:
+            st.warning(f"Fallback-Suche fehlgeschlagen: {e}")
+
+    return results
+
+
+def fetch_page_content(url: str, max_chars: int = 15000) -> Dict[str, Any]:
+    """
+    Lädt eine Webseite und extrahiert den Hauptinhalt.
+
+    Args:
+        url: URL der Webseite
+        max_chars: Maximale Zeichenanzahl des extrahierten Textes
+
+    Returns:
+        Dictionary mit 'success', 'content', 'title', 'url', 'error'
+    """
+    result = {
+        "success": False,
+        "content": "",
+        "title": "",
+        "url": url,
+        "error": None
+    }
+
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "de-DE,de;q=0.9,en;q=0.8"
+        }
+
+        response = requests.get(url, headers=headers, timeout=15, allow_redirects=True)
+        response.raise_for_status()
+
+        # Encoding korrigieren
+        if response.encoding == 'ISO-8859-1':
+            response.encoding = response.apparent_encoding
+
+        soup = BeautifulSoup(response.text, 'html.parser')
+
+        # Titel extrahieren
+        title_tag = soup.find('title')
+        result["title"] = title_tag.get_text(strip=True) if title_tag else ""
+
+        # Unwichtige Elemente entfernen
+        for element in soup.select('script, style, nav, footer, header, aside, .sidebar, .navigation, .menu, .ad, .advertisement, .cookie, .popup, form, iframe'):
+            element.decompose()
+
+        # Hauptinhalt finden (verschiedene Strategien)
+        main_content = None
+
+        # Strategie 1: Article-Tag
+        main_content = soup.find('article')
+
+        # Strategie 2: Main-Tag
+        if not main_content:
+            main_content = soup.find('main')
+
+        # Strategie 3: Content-Div
+        if not main_content:
+            for selector in ['.content', '#content', '.post-content', '.entry-content', '.article-content', '.main-content']:
+                main_content = soup.select_one(selector)
+                if main_content:
+                    break
+
+        # Strategie 4: Body
+        if not main_content:
+            main_content = soup.find('body')
+
+        if main_content:
+            # Text extrahieren
+            paragraphs = main_content.find_all(['p', 'h1', 'h2', 'h3', 'h4', 'li', 'td', 'th'])
+            text_parts = []
+
+            for p in paragraphs:
+                text = p.get_text(strip=True)
+                if len(text) > 20:  # Nur sinnvolle Absätze
+                    text_parts.append(text)
+
+            content = "\n\n".join(text_parts)
+
+            # Auf maximale Länge kürzen
+            if len(content) > max_chars:
+                content = content[:max_chars] + "..."
+
+            result["content"] = content
+            result["success"] = True
+        else:
+            result["error"] = "Kein Hauptinhalt gefunden"
+
+    except requests.Timeout:
+        result["error"] = "Zeitüberschreitung beim Laden"
+    except requests.RequestException as e:
+        result["error"] = f"Netzwerkfehler: {str(e)[:100]}"
+    except Exception as e:
+        result["error"] = f"Fehler: {str(e)[:100]}"
+
+    return result
+
+
+def is_trusted_source(url: str, category: str = "allgemein") -> Tuple[bool, str]:
+    """
+    Prüft, ob eine URL von einer vertrauenswürdigen Quelle stammt.
+
+    Returns:
+        Tuple von (ist_vertrauenswürdig, Domain-Name)
+    """
+    try:
+        domain = urlparse(url).netloc.lower()
+        # www. entfernen
+        if domain.startswith("www."):
+            domain = domain[4:]
+
+        trusted_list = TRUSTED_DOMAINS.get(category, []) + TRUSTED_DOMAINS.get("allgemein", [])
+
+        for trusted in trusted_list:
+            if trusted in domain:
+                return True, domain
+
+        return False, domain
+    except:
+        return False, "unbekannt"
+
+
+def generate_cards_from_web_content(
+    topic: str,
+    sources: List[Dict[str, Any]],
+    num_cards: int = 20,
+    card_format: str = "mixed",
+    subject: str = "Allgemein"
+) -> str:
+    """
+    Generiert Karteikarten aus gesammelten Web-Inhalten.
+
+    Args:
+        topic: Das Lernthema
+        sources: Liste der gesammelten Quellen mit Inhalten
+        num_cards: Anzahl der zu erstellenden Karten
+        card_format: "mixed", "mc_only", "freetext_only"
+        subject: Fachbereich
+
+    Returns:
+        JSON-String mit den generierten Karten
+    """
+    # Format-Anweisung
+    if card_format == "mc_only":
+        format_instruction = "Erstelle NUR Multiple-Choice-Karten (mit choices und correct_choice_index)."
+    elif card_format == "freetext_only":
+        format_instruction = "Erstelle NUR Freitext-Karten (choices und correct_choice_index auf null setzen)."
+    else:
+        format_instruction = "Erstelle eine Mischung aus Multiple-Choice und Freitext-Karten (ca. 50/50)."
+
+    # Quelleninhalte zusammenfassen
+    source_texts = []
+    for i, src in enumerate(sources, 1):
+        if src.get("content"):
+            source_texts.append(f"""
+=== QUELLE {i}: {src.get('title', 'Unbekannt')} ===
+URL: {src.get('url', '')}
+Vertrauenswürdig: {'Ja' if src.get('trusted', False) else 'Nein'}
+
+{src.get('content', '')[:8000]}
+""")
+
+    combined_sources = "\n\n".join(source_texts)
+
+    system_prompt = f"""Du bist ein Experte für die Erstellung von Lernkarten im Bereich {subject}.
+
+DEINE AUFGABE:
+Erstelle {num_cards} hochwertige Lernkarten zum Thema "{topic}" basierend auf den bereitgestellten Quellen.
+
+WICHTIGE REGELN:
+1. Nutze NUR Informationen aus den bereitgestellten Quellen
+2. Bevorzuge Informationen aus vertrauenswürdigen Quellen
+3. Wenn verschiedene Quellen widersprüchliche Informationen haben, nutze die vertrauenswürdigere oder erwähne beide Sichtweisen
+4. Erstelle präzise, lernbare Fragen mit klaren Antworten
+5. {format_instruction}
+
+KRITISCH für Multiple-Choice:
+- "choices" muss eine Liste mit 4 VOLLSTÄNDIGEN Antworttexten sein
+- FALSCH: ["A", "B", "C", "D"]
+- RICHTIG: ["Lavandula angustifolia", "Rosa canina", "Salvia officinalis", "Thymus vulgaris"]
+- "correct_choice_index" ist der Index (0-3) der richtigen Antwort
+
+AUSGABEFORMAT (JSON-Array):
+[
+  {{
+    "question": "Welche Pflanze ist für ihre beruhigende Wirkung bekannt?",
+    "answer": "Lavendel (Lavandula angustifolia)",
+    "explanation": "Lavendel wird seit Jahrhunderten für seine beruhigenden Eigenschaften verwendet. Das ätherische Öl wirkt entspannend und schlaffördernd.",
+    "choices": ["Lavandula angustifolia", "Rosa canina", "Salvia officinalis", "Thymus vulgaris"],
+    "correct_choice_index": 0
+  }},
+  {{
+    "question": "Welchen Standort bevorzugt Lavendel?",
+    "answer": "Sonnig und trocken mit durchlässigem Boden",
+    "explanation": "Lavendel stammt aus dem Mittelmeerraum und benötigt volle Sonne sowie einen gut drainierten, eher mageren Boden.",
+    "choices": null,
+    "correct_choice_index": null
+  }}
+]
+
+Antworte NUR mit dem JSON-Array, keine weiteren Erklärungen."""
+
+    user_prompt = f"""Thema: {topic}
+Fachbereich: {subject}
+Anzahl Karten: {num_cards}
+
+QUELLEN:
+{combined_sources}
+
+Erstelle jetzt {num_cards} Lernkarten basierend auf diesen Quellen."""
+
+    # Token-Limit basierend auf Kartenanzahl
+    max_tokens = min(4096 + (num_cards * 150), 16000)
+
+    return call_llm(system_prompt, user_prompt, max_tokens=max_tokens)
+
+
+def page_web_research():
+    """Seite für die Erstellung von Karteikarten durch Web-Recherche."""
+    st.title("🌐 Web-Recherche Karteikarten")
+
+    st.write("""
+    Erstelle Karteikarten zu jedem Thema – die KI recherchiert automatisch im Internet,
+    prüft mehrere Quellen und erstellt fundierte Lernkarten.
+    """)
+
+    # Warnhinweis
+    st.info("""
+    **Hinweis:** Die KI sucht Informationen aus dem Internet und versucht, diese zu verifizieren.
+    Dennoch solltest du wichtige Fakten für Prüfungen immer mit deinen Lehrmaterialien abgleichen.
+    """)
+
+    # Deck auswählen oder erstellen
+    decks = db_get_decks(st.session_state.user_id)
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if decks:
+            deck_options = ["➕ Neues Deck erstellen"] + [d.name for d in decks]
+            selected_deck = st.selectbox("Ziel-Deck", deck_options, key="web_deck")
+        else:
+            selected_deck = "➕ Neues Deck erstellen"
+            st.info("Noch keine Decks vorhanden.")
+
+    with col2:
+        subject = st.selectbox("Fachbereich", [
+            "Garten- und Landschaftsbau",
+            "Pflanzenkunde",
+            "Handwerk",
+            "Biologie",
+            "Geographie",
+            "Geschichte",
+            "Allgemeinwissen",
+            "Andere"
+        ], key="web_subject")
+
+    # Neues Deck erstellen
+    if selected_deck == "➕ Neues Deck erstellen":
+        with st.expander("📁 Neues Deck erstellen", expanded=True):
+            new_name = st.text_input("Deck-Name", placeholder="z.B. Stauden und Gehölze")
+            new_topic = st.text_input("Thema", placeholder="z.B. Pflanzenkunde für GaLaBau")
+
+            if st.button("Deck erstellen", key="create_web_deck"):
+                if new_name and new_topic:
+                    new_deck = db_create_deck(
+                        st.session_state.user_id,
+                        new_name,
+                        subject,
+                        new_topic
+                    )
+                    st.success(f"Deck '{new_name}' erstellt!")
+                    st.rerun()
+                else:
+                    st.error("Bitte Name und Thema eingeben.")
+        return
+
+    # Deck ID ermitteln
+    deck = next((d for d in decks if d.name == selected_deck), None)
+    if not deck:
+        return
+
+    st.markdown("---")
+
+    # Suchthema eingeben
+    st.subheader("🔍 Thema für Web-Recherche")
+
+    # Beispielthemen
+    example_topics = {
+        "Garten- und Landschaftsbau": [
+            "Stauden für schattige Standorte",
+            "Pflasterarbeiten Verlegemuster",
+            "Bodendecker für Hangbefestigung",
+            "Heckenpflanzen immergrün",
+            "Rasenanlage und Rasenpflege"
+        ],
+        "Pflanzenkunde": [
+            "Lavendel Arten und Pflege",
+            "Heimische Wildblumen Deutschland",
+            "Giftpflanzen im Garten erkennen",
+            "Obstbaumschnitt Grundlagen",
+            "Kräuter für die Küche"
+        ],
+        "Handwerk": [
+            "Holzverbindungen Arten",
+            "Mauerwerk Verbände",
+            "Dachziegel Arten",
+            "Elektroinstallation Grundlagen",
+            "Sanitär Grundlagen"
+        ]
+    }
+
+    # Beispielvorschläge anzeigen
+    examples = example_topics.get(subject, example_topics["Pflanzenkunde"])
+    st.caption(f"Beispiele: {', '.join(examples[:3])}")
+
+    search_topic = st.text_input(
+        "Suchthema eingeben",
+        placeholder="z.B. Stauden für sonnige Standorte",
+        help="Gib ein konkretes Thema ein, zu dem du Lernkarten erstellen möchtest."
+    )
+
+    # Erweiterte Optionen
+    with st.expander("⚙️ Erweiterte Optionen"):
+        col1, col2 = st.columns(2)
+        with col1:
+            num_sources = st.slider("Anzahl Quellen", 3, 10, 5, help="Mehr Quellen = bessere Verifikation, aber längere Ladezeit")
+            num_cards = st.slider("Anzahl Karten", 5, 50, 20)
+        with col2:
+            card_format = st.selectbox("Kartenformat", [
+                ("Gemischt (MC + Freitext)", "mixed"),
+                ("Nur Multiple-Choice", "mc_only"),
+                ("Nur Freitext", "freetext_only")
+            ], format_func=lambda x: x[0])[1]
+
+            verify_sources = st.checkbox("Quellen verifizieren", value=True,
+                help="Bevorzugt vertrauenswürdige Fachseiten")
+
+    st.markdown("---")
+
+    # Recherche starten
+    if st.button("🚀 Recherche starten & Karten erstellen", type="primary", disabled=not search_topic):
+        if not search_topic:
+            st.error("Bitte gib ein Suchthema ein.")
+            return
+
+        # Kategorisierung für Quellenprüfung
+        category = "garten" if subject in ["Garten- und Landschaftsbau", "Pflanzenkunde"] else \
+                   "handwerk" if subject == "Handwerk" else "allgemein"
+
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+
+        try:
+            # Schritt 1: Web-Suche
+            status_text.text("🔍 Suche im Internet...")
+            progress_bar.progress(10)
+
+            # Erweiterte Suchanfrage für bessere Ergebnisse
+            enhanced_query = f"{search_topic} {subject} Fachwissen"
+            search_results = search_web(enhanced_query, num_results=num_sources + 3)
+
+            if not search_results:
+                st.error("Keine Suchergebnisse gefunden. Bitte versuche einen anderen Suchbegriff.")
+                return
+
+            st.write(f"**{len(search_results)} Suchergebnisse gefunden**")
+            progress_bar.progress(20)
+
+            # Schritt 2: Inhalte laden
+            status_text.text("📥 Lade Inhalte von Webseiten...")
+
+            sources_with_content = []
+            source_status = st.empty()
+
+            for i, result in enumerate(search_results):
+                if len(sources_with_content) >= num_sources:
+                    break
+
+                url = result.get("url", "")
+                if not url:
+                    continue
+
+                source_status.text(f"Lade: {result.get('title', url)[:50]}...")
+
+                # Inhalt laden
+                page_data = fetch_page_content(url)
+
+                if page_data["success"] and len(page_data["content"]) > 200:
+                    # Vertrauenswürdigkeit prüfen
+                    is_trusted, domain = is_trusted_source(url, category)
+
+                    sources_with_content.append({
+                        "title": page_data["title"] or result.get("title", ""),
+                        "url": url,
+                        "content": page_data["content"],
+                        "domain": domain,
+                        "trusted": is_trusted,
+                        "snippet": result.get("snippet", "")
+                    })
+
+                progress_bar.progress(20 + int(40 * (i + 1) / len(search_results)))
+                time.sleep(0.5)  # Rate-Limiting
+
+            source_status.empty()
+
+            if len(sources_with_content) < 2:
+                st.error("Nicht genügend Inhalte gefunden. Bitte versuche einen anderen Suchbegriff.")
+                return
+
+            # Quellen anzeigen
+            st.subheader("📚 Gefundene Quellen")
+            for src in sources_with_content:
+                trust_badge = "✅ Vertrauenswürdig" if src["trusted"] else "⚠️ Nicht verifiziert"
+                st.markdown(f"- [{src['title'][:60]}...]({src['url']}) ({src['domain']}) - {trust_badge}")
+
+            progress_bar.progress(60)
+
+            # Schritt 3: Karten generieren
+            status_text.text("🤖 KI generiert Karteikarten aus den Quellen...")
+
+            # Sortiere Quellen: Vertrauenswürdige zuerst
+            if verify_sources:
+                sources_with_content.sort(key=lambda x: (not x["trusted"], -len(x["content"])))
+
+            raw_response = generate_cards_from_web_content(
+                topic=search_topic,
+                sources=sources_with_content,
+                num_cards=num_cards,
+                card_format=card_format,
+                subject=subject
+            )
+
+            progress_bar.progress(85)
+            status_text.text("💾 Speichere Karteikarten...")
+
+            # JSON parsen
+            json_match = re.search(r'\[.*\]', raw_response, re.DOTALL)
+            if not json_match:
+                st.error("Fehler beim Parsen der KI-Antwort.")
+                st.code(raw_response[:500])
+                return
+
+            cards_data = json.loads(json_match.group())
+
+            # Karten speichern
+            saved_count = 0
+            for card_data in cards_data:
+                try:
+                    # Quellen als Teil der Erklärung hinzufügen
+                    explanation = card_data.get("explanation", "")
+                    source_note = f"\n\n📚 Quellen: Web-Recherche zu '{search_topic}'"
+
+                    card = Card(
+                        id=0,
+                        deck_id=deck.id,
+                        user_id=st.session_state.user_id,
+                        subject=subject,
+                        question=card_data.get("question", ""),
+                        answer=card_data.get("answer", ""),
+                        explanation=explanation + source_note,
+                        choices=card_data.get("choices"),
+                        correct_choice_index=card_data.get("correct_choice_index"),
+                        due_date=dt.date.today(),
+                        tags=["web-recherche", search_topic.lower().replace(" ", "-")[:20]]
+                    )
+
+                    if card.question and card.answer:
+                        db_insert_card(card)
+                        saved_count += 1
+                except Exception as e:
+                    st.warning(f"Karte übersprungen: {e}")
+
+            progress_bar.progress(100)
+            status_text.empty()
+
+            if saved_count > 0:
+                st.success(f"""
+                ✅ **{saved_count} Karteikarten erstellt!**
+
+                Die Karten wurden im Deck **{deck.name}** gespeichert.
+
+                📊 Quellen: {len(sources_with_content)} Webseiten analysiert
+                ✅ Davon vertrauenswürdig: {sum(1 for s in sources_with_content if s['trusted'])}
+                """)
+                st.balloons()
+
+                # XP vergeben
+                award_xp("cards_created", saved_count)
+            else:
+                st.error("Keine Karten konnten erstellt werden.")
+
+        except LLMError as e:
+            st.error(f"KI-Fehler: {e}")
+        except Exception as e:
+            st.error(f"Fehler bei der Verarbeitung: {e}")
+            import traceback
+            st.code(traceback.format_exc())
+
+    # Beispiel-Schnellauswahl
+    st.markdown("---")
+    st.subheader("💡 Schnellstart: Beliebte Themen")
+
+    col1, col2, col3 = st.columns(3)
+
+    popular_topics = [
+        ("🌸 Frühjahrsblüher", "Frühjahrsblüher Zwiebelpflanzen"),
+        ("🌿 Kräutergarten", "Küchenkräuter Anbau Verwendung"),
+        ("🪨 Natursteinmauer", "Natursteinmauer bauen Trockenmauer"),
+        ("🌳 Obstbäume", "Obstbäume Sorten Schnitt Pflege"),
+        ("🌺 Staudenbeete", "Staudenbeete anlegen planen"),
+        ("🏡 Rasenpflege", "Rasen anlegen pflegen mähen")
+    ]
+
+    for i, (label, topic) in enumerate(popular_topics):
+        col = [col1, col2, col3][i % 3]
+        with col:
+            if st.button(label, key=f"quick_{i}", use_container_width=True):
+                st.session_state["quick_topic"] = topic
+                st.rerun()
+
+    # Quick-Topic verarbeiten
+    if "quick_topic" in st.session_state:
+        st.info(f"Thema vorausgewählt: **{st.session_state['quick_topic']}**")
+        st.caption("Gib das Thema oben ein oder passe es an.")
+
+
 def page_image_cards():
     """Bildkarten-Seite für Pflanzenkunde und visuelle Lernkarten."""
     st.title("🌿 Bildkarten & Pflanzenkunde")
@@ -5017,6 +5638,7 @@ def render_challenges_section():
 PAGES = {
     "🏠 Übersicht": page_home,
     "📄 Upload & Karten": page_upload_and_generate,
+    "🌐 Web-Recherche": page_web_research,
     "🧠 Karteikarten lernen": page_study_cards,
     "🌿 Bildkarten": page_image_cards,
     "📝 Lückentext (Cloze)": page_cloze_cards,
