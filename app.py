@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Dict, Any, Tuple
 from io import BytesIO
 from collections import defaultdict
+from contextlib import contextmanager
 from urllib.parse import urlparse, urljoin
 
 import streamlit as st
@@ -36,7 +37,7 @@ except ImportError:
 # ============================================================
 
 # App-Version
-APP_VERSION = "2.2.4"
+APP_VERSION = "2.2.5"
 APP_LAST_UPDATE = "2026-01-09"
 
 load_dotenv()  # .env-Datei laden, falls vorhanden
@@ -358,10 +359,22 @@ class UserProfile:
 DB_PATH = "study_app.db"
 
 
+@contextmanager
 def get_db_connection():
+    """
+    Context Manager für Datenbankverbindungen.
+    Stellt sicher, dass Verbindungen immer geschlossen werden.
+    """
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
-    return conn
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def init_db_schema():
