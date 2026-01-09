@@ -36,7 +36,7 @@ except ImportError:
 # ============================================================
 
 # App-Version
-APP_VERSION = "2.2.0"
+APP_VERSION = "2.2.1"
 APP_LAST_UPDATE = "2026-01-09"
 
 load_dotenv()  # .env-Datei laden, falls vorhanden
@@ -4149,87 +4149,172 @@ def display_card_image(image_data: str, caption: str = None):
 # 9c2. Web-Recherche für Karteikarten
 # ============================================================
 
-# Vertrauenswürdige Domains für Fachthemen
+# Vertrauenswürdige Domains für Fachthemen (nur .de/.at/.ch)
 TRUSTED_DOMAINS = {
     "garten": [
         "mein-schoener-garten.de", "gartenjournal.net", "gartenlexikon.de",
         "pflanzen-vielfalt.de", "baumkunde.de", "pflanzenbestimmung.info",
-        "naturadb.de", "floraweb.de", "wikipedia.org", "nabu.de",
-        "lwg.bayern.de", "gartenakademie.rlp.de"
+        "naturadb.de", "floraweb.de", "nabu.de", "gartendialog.de",
+        "lwg.bayern.de", "gartenakademie.rlp.de", "hausgarten.net",
+        "pflanzmich.de", "baldur-garten.de", "gartentipps.de",
+        "plantura.garden", "native-plants.de", "lubera.de"
     ],
     "handwerk": [
         "bauen.de", "selbst.de", "hornbach.de", "obi.de",
-        "bauhaus.info", "wikipedia.org", "handwerk.de"
+        "bauhaus.info", "handwerk.de", "baumarkt.de",
+        "heimwerker.de", "sanier.de", "hausjournal.net"
     ],
     "allgemein": [
         "wikipedia.org", "spektrum.de", "planet-wissen.de",
-        "geo.de", "wissen.de"
+        "geo.de", "wissen.de", "br.de", "ndr.de", "swr.de"
     ]
 }
 
 
-def search_web(query: str, num_results: int = 8, region: str = "de-de") -> List[Dict[str, str]]:
+def search_web(query: str, num_results: int = 8) -> List[Dict[str, str]]:
     """
     Sucht im Web nach einem Thema und gibt Suchergebnisse zurück.
+    Verwendet nur deutsche Seiten mit HTTPS.
 
     Args:
         query: Suchbegriff
         num_results: Anzahl der gewünschten Ergebnisse
-        region: Region für die Suche (Standard: deutsch)
 
     Returns:
         Liste von Dictionaries mit 'title', 'url', 'snippet'
     """
     results = []
 
-    if DDGS_AVAILABLE:
+    # Suchbegriff für deutsche Ergebnisse optimieren
+    german_query = f"{query} site:.de OR site:.at OR site:.ch"
+
+    # Methode 1: DuckDuckGo Search Library
+    if DDGS_AVAILABLE and not results:
         try:
             with DDGS() as ddgs:
-                search_results = ddgs.text(
-                    query,
-                    region=region,
-                    max_results=num_results
-                )
+                search_results = list(ddgs.text(
+                    german_query,
+                    region="de-de",
+                    safesearch="moderate",
+                    max_results=num_results * 2  # Mehr holen wegen Filter
+                ))
+
                 for r in search_results:
+                    url = r.get("href", r.get("link", ""))
+
+                    # Nur HTTPS-URLs
+                    if not url.startswith("https://"):
+                        continue
+
+                    # Deutsche Domains bevorzugen
+                    domain = urlparse(url).netloc.lower()
+
                     results.append({
                         "title": r.get("title", ""),
-                        "url": r.get("href", r.get("link", "")),
-                        "snippet": r.get("body", r.get("snippet", ""))
+                        "url": url,
+                        "snippet": r.get("body", r.get("snippet", "")),
+                        "domain": domain
                     })
-        except Exception as e:
-            st.warning(f"DuckDuckGo-Suche fehlgeschlagen: {e}")
 
-    # Fallback: Einfache Google-Suche über requests (nur für Notfälle)
-    if not results:
+                    if len(results) >= num_results:
+                        break
+
+        except Exception as e:
+            st.warning(f"DuckDuckGo-Suche: {e}")
+
+    # Methode 2: Direkte DuckDuckGo HTML-Suche als Fallback
+    if len(results) < 3:
         try:
             headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept-Language": "de-DE,de;q=0.9"
             }
-            search_url = f"https://html.duckduckgo.com/html/?q={requests.utils.quote(query)}"
-            response = requests.get(search_url, headers=headers, timeout=10)
+
+            # DuckDuckGo Lite für zuverlässigere Ergebnisse
+            encoded_query = requests.utils.quote(f"{query} site:.de")
+            search_url = f"https://lite.duckduckgo.com/lite/?q={encoded_query}&kl=de-de"
+
+            response = requests.get(search_url, headers=headers, timeout=15)
+            response.encoding = 'utf-8'
             soup = BeautifulSoup(response.text, 'html.parser')
 
-            for result in soup.select('.result')[:num_results]:
-                title_elem = result.select_one('.result__title')
-                link_elem = result.select_one('.result__url')
-                snippet_elem = result.select_one('.result__snippet')
+            # Links aus der Lite-Version extrahieren
+            for link in soup.find_all('a', class_='result-link'):
+                url = link.get('href', '')
 
-                if title_elem and link_elem:
-                    url = link_elem.get('href', '')
-                    if url.startswith('//duckduckgo.com/l/?uddg='):
-                        # URL dekodieren
-                        import urllib.parse
-                        url = urllib.parse.unquote(url.split('uddg=')[1].split('&')[0])
+                if not url.startswith('https://'):
+                    continue
 
+                title = link.get_text(strip=True)
+
+                # Snippet aus dem nächsten Element
+                snippet_elem = link.find_next('td', class_='result-snippet')
+                snippet = snippet_elem.get_text(strip=True) if snippet_elem else ""
+
+                if url and title:
                     results.append({
-                        "title": title_elem.get_text(strip=True),
+                        "title": title,
                         "url": url,
-                        "snippet": snippet_elem.get_text(strip=True) if snippet_elem else ""
+                        "snippet": snippet,
+                        "domain": urlparse(url).netloc.lower()
                     })
-        except Exception as e:
-            st.warning(f"Fallback-Suche fehlgeschlagen: {e}")
 
-    return results
+                if len(results) >= num_results:
+                    break
+
+        except Exception as e:
+            st.warning(f"Fallback-Suche: {e}")
+
+    # Methode 3: Alternative über requests wenn nichts funktioniert
+    if len(results) < 3:
+        try:
+            # Versuche mit Startpage (datenschutzfreundliche Suche)
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Accept-Language": "de-DE,de;q=0.9"
+            }
+
+            # Einfache Suche über ecosia (deutsch-freundlich)
+            encoded_query = requests.utils.quote(query)
+            search_url = f"https://www.ecosia.org/search?q={encoded_query}&l=de"
+
+            response = requests.get(search_url, headers=headers, timeout=15)
+            soup = BeautifulSoup(response.text, 'html.parser')
+
+            for result in soup.select('a.result__link, .result a[href^="https://"]'):
+                url = result.get('href', '')
+
+                if not url.startswith('https://'):
+                    continue
+                if 'ecosia.org' in url:
+                    continue
+
+                title = result.get_text(strip=True)
+
+                if url and title and len(title) > 5:
+                    results.append({
+                        "title": title[:100],
+                        "url": url,
+                        "snippet": "",
+                        "domain": urlparse(url).netloc.lower()
+                    })
+
+                if len(results) >= num_results:
+                    break
+
+        except Exception as e:
+            pass  # Stille Fehlerbehandlung für Fallback
+
+    # Duplikate entfernen (basierend auf Domain)
+    seen_domains = set()
+    unique_results = []
+    for r in results:
+        domain = r.get("domain", "")
+        if domain not in seen_domains:
+            seen_domains.add(domain)
+            unique_results.append(r)
+
+    return unique_results[:num_results]
 
 
 def fetch_page_content(url: str, max_chars: int = 15000) -> Dict[str, Any]:
@@ -4583,18 +4668,27 @@ def page_web_research():
 
         try:
             # Schritt 1: Web-Suche
-            status_text.text("🔍 Suche im Internet...")
+            status_text.text(f"🔍 Suche nach: {search_topic}...")
             progress_bar.progress(10)
 
-            # Erweiterte Suchanfrage für bessere Ergebnisse
-            enhanced_query = f"{search_topic} {subject} Fachwissen"
-            search_results = search_web(enhanced_query, num_results=num_sources + 3)
+            # Zeige dem Nutzer was gesucht wird
+            st.info(f"🔍 **Suchbegriff:** {search_topic}")
+
+            # Direkte Suche mit dem Thema (ohne Zusätze die verwirren könnten)
+            search_results = search_web(search_topic, num_results=num_sources + 3)
 
             if not search_results:
-                st.error("Keine Suchergebnisse gefunden. Bitte versuche einen anderen Suchbegriff.")
+                st.error(f"""
+                Keine Suchergebnisse für "{search_topic}" gefunden.
+
+                **Tipps:**
+                - Verwende einfachere Suchbegriffe
+                - Prüfe die Schreibweise
+                - Versuche: "Lavendel Pflege" statt "Lavandula angustifolia Kultivierung"
+                """)
                 return
 
-            st.write(f"**{len(search_results)} Suchergebnisse gefunden**")
+            st.success(f"**{len(search_results)} deutsche Webseiten gefunden**")
             progress_bar.progress(20)
 
             # Schritt 2: Inhalte laden
