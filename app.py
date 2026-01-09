@@ -37,7 +37,7 @@ except ImportError:
 # ============================================================
 
 # App-Version
-APP_VERSION = "2.2.5"
+APP_VERSION = "2.2.6"
 APP_LAST_UPDATE = "2026-01-09"
 
 load_dotenv()  # .env-Datei laden, falls vorhanden
@@ -1732,6 +1732,8 @@ def init_llm_state():
         st.session_state.anthropic_api_key = get_secret("ANTHROPIC_API_KEY", "")
     if "llm_connection_status" not in st.session_state:
         st.session_state.llm_connection_status = None
+    if "llm_auto_tested" not in st.session_state:
+        st.session_state.llm_auto_tested = False
     if "current_cards" not in st.session_state:
         st.session_state.current_cards: List[Card] = []
     if "current_card_index" not in st.session_state:
@@ -1740,6 +1742,42 @@ def init_llm_state():
         st.session_state.current_exam = None
     if "study_answer_mode" not in st.session_state:
         st.session_state.study_answer_mode = "Freitext"  # "Freitext" oder "Multiple Choice"
+
+    # Auto-Test der Verbindung beim Start, wenn API-Key vorhanden
+    if not st.session_state.llm_auto_tested:
+        st.session_state.llm_auto_tested = True
+        api_key = st.session_state.openai_api_key if st.session_state.llm_provider == "openai" else st.session_state.anthropic_api_key
+        if api_key and len(api_key) > 10:
+            try:
+                test_llm_connection_silent()
+            except Exception:
+                pass
+
+
+def test_llm_connection_silent():
+    """
+    Stille Verbindungsprüfung ohne Streamlit-Ausgaben.
+    Wird beim App-Start automatisch aufgerufen.
+    """
+    try:
+        client, provider = get_llm_client()
+
+        if provider == "openai":
+            resp = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": "Hi"}],
+                max_tokens=5,
+            )
+            st.session_state.llm_connection_status = "ok"
+        else:
+            resp = client.messages.create(
+                model="claude-3-5-sonnet-20240620",
+                max_tokens=5,
+                messages=[{"role": "user", "content": "Hi"}],
+            )
+            st.session_state.llm_connection_status = "ok"
+    except Exception as e:
+        st.session_state.llm_connection_status = str(e)[:100]
 
 
 def init_gamification_state():
@@ -5911,6 +5949,49 @@ PAGES = {
 }
 
 st.sidebar.title("Navigation")
+
+# KI-Status Anzeige (Lampe)
+def render_ki_status():
+    """Zeigt den KI-Verbindungsstatus als farbige Lampe an."""
+    status = st.session_state.get("llm_connection_status")
+    provider = st.session_state.get("llm_provider", "openai")
+    provider_name = "OpenAI" if provider == "openai" else "Claude"
+
+    if status == "ok":
+        # Grün - Verbunden
+        st.sidebar.markdown(f"""
+        <div style="display: flex; align-items: center; padding: 8px; background: #d4edda; border-radius: 8px; margin-bottom: 10px;">
+            <span style="font-size: 20px; margin-right: 8px;">🟢</span>
+            <span style="color: #155724; font-size: 14px;"><b>KI verbunden</b><br><small>{provider_name}</small></span>
+        </div>
+        """, unsafe_allow_html=True)
+    elif status is None:
+        # Grau - Nicht getestet
+        api_key = st.session_state.get("openai_api_key", "") if provider == "openai" else st.session_state.get("anthropic_api_key", "")
+        if api_key and len(api_key) > 10:
+            st.sidebar.markdown(f"""
+            <div style="display: flex; align-items: center; padding: 8px; background: #fff3cd; border-radius: 8px; margin-bottom: 10px;">
+                <span style="font-size: 20px; margin-right: 8px;">🟡</span>
+                <span style="color: #856404; font-size: 14px;"><b>KI bereit</b><br><small>Nicht getestet</small></span>
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            st.sidebar.markdown(f"""
+            <div style="display: flex; align-items: center; padding: 8px; background: #e2e3e5; border-radius: 8px; margin-bottom: 10px;">
+                <span style="font-size: 20px; margin-right: 8px;">⚪</span>
+                <span style="color: #6c757d; font-size: 14px;"><b>Kein API-Key</b><br><small>→ KI-Einstellungen</small></span>
+            </div>
+            """, unsafe_allow_html=True)
+    else:
+        # Rot - Fehler
+        st.sidebar.markdown(f"""
+        <div style="display: flex; align-items: center; padding: 8px; background: #f8d7da; border-radius: 8px; margin-bottom: 10px;">
+            <span style="font-size: 20px; margin-right: 8px;">🔴</span>
+            <span style="color: #721c24; font-size: 14px;"><b>KI-Fehler</b><br><small>→ KI-Einstellungen</small></span>
+        </div>
+        """, unsafe_allow_html=True)
+
+render_ki_status()
 
 # Gamification in Sidebar anzeigen
 render_gamification_header()
