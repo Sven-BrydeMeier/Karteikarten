@@ -36,7 +36,7 @@ except ImportError:
 # ============================================================
 
 # App-Version
-APP_VERSION = "2.2.2"
+APP_VERSION = "2.2.3"
 APP_LAST_UPDATE = "2026-01-09"
 
 load_dotenv()  # .env-Datei laden, falls vorhanden
@@ -4200,7 +4200,7 @@ def display_card_image(image_data: str, caption: str = None):
 # 9c2. Web-Recherche für Karteikarten
 # ============================================================
 
-# Vertrauenswürdige Domains für Fachthemen (nur .de/.at/.ch)
+# Vertrauenswürdige Domains für Fachthemen (deutschsprachige Quellen)
 TRUSTED_DOMAINS = {
     "garten": [
         "mein-schoener-garten.de", "gartenjournal.net", "gartenlexikon.de",
@@ -4225,7 +4225,7 @@ TRUSTED_DOMAINS = {
 def search_web(query: str, num_results: int = 8) -> List[Dict[str, str]]:
     """
     Sucht im Web nach einem Thema und gibt Suchergebnisse zurück.
-    Verwendet nur deutsche Seiten mit HTTPS.
+    Verwendet nur deutschsprachige Seiten mit HTTPS (keine Domain-Einschränkung).
 
     Args:
         query: Suchbegriff
@@ -4236,28 +4236,25 @@ def search_web(query: str, num_results: int = 8) -> List[Dict[str, str]]:
     """
     results = []
 
-    # Suchbegriff für deutsche Ergebnisse optimieren
-    german_query = f"{query} site:.de OR site:.at OR site:.ch"
-
-    # Methode 1: DuckDuckGo Search Library
+    # Methode 1: DuckDuckGo Search Library (deutschsprachig, keine Domain-Einschränkung)
     if DDGS_AVAILABLE and not results:
         try:
             with DDGS() as ddgs:
+                # Suche mit deutscher Region - findet deutschsprachige Inhalte weltweit
                 search_results = list(ddgs.text(
-                    german_query,
-                    region="de-de",
+                    query,  # Originaler Suchbegriff ohne site:-Filter
+                    region="de-de",  # Deutsche Region für deutschsprachige Ergebnisse
                     safesearch="moderate",
-                    max_results=num_results * 2  # Mehr holen wegen Filter
+                    max_results=num_results * 2  # Mehr holen wegen HTTPS-Filter
                 ))
 
                 for r in search_results:
                     url = r.get("href", r.get("link", ""))
 
-                    # Nur HTTPS-URLs
+                    # Nur HTTPS-URLs (Sicherheit)
                     if not url.startswith("https://"):
                         continue
 
-                    # Deutsche Domains bevorzugen
                     domain = urlparse(url).netloc.lower()
 
                     results.append({
@@ -4281,8 +4278,8 @@ def search_web(query: str, num_results: int = 8) -> List[Dict[str, str]]:
                 "Accept-Language": "de-DE,de;q=0.9"
             }
 
-            # DuckDuckGo Lite für zuverlässigere Ergebnisse
-            encoded_query = requests.utils.quote(f"{query} site:.de")
+            # DuckDuckGo Lite mit deutscher Region (kl=de-de)
+            encoded_query = requests.utils.quote(query)
             search_url = f"https://lite.duckduckgo.com/lite/?q={encoded_query}&kl=de-de"
 
             response = requests.get(search_url, headers=headers, timeout=15)
