@@ -37,7 +37,7 @@ except ImportError:
 # ============================================================
 
 # App-Version
-APP_VERSION = "2.3.0"
+APP_VERSION = "2.3.1"
 APP_LAST_UPDATE = "2026-01-09"
 
 load_dotenv()  # .env-Datei laden, falls vorhanden
@@ -1709,8 +1709,22 @@ def get_secret(key: str, default: str = "") -> str:
     """
     # 1. Streamlit Secrets prüfen (Streamlit Cloud)
     try:
-        if hasattr(st, 'secrets') and key in st.secrets:
-            return st.secrets[key]
+        if hasattr(st, 'secrets'):
+            # Direkt unter dem Key-Namen
+            if key in st.secrets:
+                return str(st.secrets[key])
+            # Lowercase-Variante
+            if key.lower() in st.secrets:
+                return str(st.secrets[key.lower()])
+            # Unter [api_keys] oder [openai] Section
+            if "api_keys" in st.secrets and key in st.secrets["api_keys"]:
+                return str(st.secrets["api_keys"][key])
+            if "openai" in st.secrets and "api_key" in st.secrets["openai"]:
+                if key == "OPENAI_API_KEY":
+                    return str(st.secrets["openai"]["api_key"])
+            if "anthropic" in st.secrets and "api_key" in st.secrets["anthropic"]:
+                if key == "ANTHROPIC_API_KEY":
+                    return str(st.secrets["anthropic"]["api_key"])
     except Exception:
         pass
 
@@ -1725,11 +1739,23 @@ def get_secret(key: str, default: str = "") -> str:
 def init_llm_state():
     if "llm_provider" not in st.session_state:
         st.session_state.llm_provider = "openai"  # "openai" oder "anthropic"
-    if "openai_api_key" not in st.session_state:
-        # Aus Streamlit Secrets oder .env vorbelegen
-        st.session_state.openai_api_key = get_secret("OPENAI_API_KEY", "")
-    if "anthropic_api_key" not in st.session_state:
-        st.session_state.anthropic_api_key = get_secret("ANTHROPIC_API_KEY", "")
+
+    # IMMER Secrets zuerst prüfen - überschreibt leere Session-Werte
+    secret_openai = get_secret("OPENAI_API_KEY", "")
+    secret_anthropic = get_secret("ANTHROPIC_API_KEY", "")
+
+    # OpenAI Key: Secret hat Priorität, dann Session State
+    if secret_openai:
+        st.session_state.openai_api_key = secret_openai
+    elif "openai_api_key" not in st.session_state:
+        st.session_state.openai_api_key = ""
+
+    # Anthropic Key: Secret hat Priorität, dann Session State
+    if secret_anthropic:
+        st.session_state.anthropic_api_key = secret_anthropic
+    elif "anthropic_api_key" not in st.session_state:
+        st.session_state.anthropic_api_key = ""
+
     if "llm_connection_status" not in st.session_state:
         st.session_state.llm_connection_status = None
     if "llm_auto_tested" not in st.session_state:
