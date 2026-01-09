@@ -36,7 +36,7 @@ except ImportError:
 # ============================================================
 
 # App-Version
-APP_VERSION = "2.2.1"
+APP_VERSION = "2.2.2"
 APP_LAST_UPDATE = "2026-01-09"
 
 load_dotenv()  # .env-Datei laden, falls vorhanden
@@ -1687,14 +1687,36 @@ def init_state():
         st.session_state.study_plan = None
 
 
+def get_secret(key: str, default: str = "") -> str:
+    """
+    Holt einen API-Key aus verschiedenen Quellen (Priorität):
+    1. Streamlit Secrets (st.secrets) - für Streamlit Cloud
+    2. Umgebungsvariablen (os.getenv) - für lokale Entwicklung
+    3. Default-Wert
+    """
+    # 1. Streamlit Secrets prüfen (Streamlit Cloud)
+    try:
+        if hasattr(st, 'secrets') and key in st.secrets:
+            return st.secrets[key]
+    except Exception:
+        pass
+
+    # 2. Umgebungsvariablen prüfen (lokal / .env)
+    env_value = os.getenv(key, "")
+    if env_value:
+        return env_value
+
+    return default
+
+
 def init_llm_state():
     if "llm_provider" not in st.session_state:
         st.session_state.llm_provider = "openai"  # "openai" oder "anthropic"
     if "openai_api_key" not in st.session_state:
-        # Aus .env vorbelegen, kann im UI überschrieben werden
-        st.session_state.openai_api_key = os.getenv("OPENAI_API_KEY", "")
+        # Aus Streamlit Secrets oder .env vorbelegen
+        st.session_state.openai_api_key = get_secret("OPENAI_API_KEY", "")
     if "anthropic_api_key" not in st.session_state:
-        st.session_state.anthropic_api_key = os.getenv("ANTHROPIC_API_KEY", "")
+        st.session_state.anthropic_api_key = get_secret("ANTHROPIC_API_KEY", "")
     if "llm_connection_status" not in st.session_state:
         st.session_state.llm_connection_status = None
     if "current_cards" not in st.session_state:
@@ -3544,6 +3566,24 @@ def page_llm_settings():
 
     st.write("Hier wählst du, ob die App über OpenAI (ChatGPT) oder Anthropic (Claude) läuft und kannst den API-Key hinterlegen.")
 
+    # Prüfen ob Secrets von Streamlit Cloud vorhanden sind
+    has_openai_secret = False
+    has_anthropic_secret = False
+    try:
+        if hasattr(st, 'secrets'):
+            has_openai_secret = "OPENAI_API_KEY" in st.secrets
+            has_anthropic_secret = "ANTHROPIC_API_KEY" in st.secrets
+    except Exception:
+        pass
+
+    if has_openai_secret or has_anthropic_secret:
+        st.success("✅ **API-Keys aus Streamlit Cloud Secrets geladen!**")
+        if has_openai_secret:
+            st.caption("• OpenAI API-Key ist in den Secrets hinterlegt")
+        if has_anthropic_secret:
+            st.caption("• Anthropic API-Key ist in den Secrets hinterlegt")
+        st.markdown("---")
+
     provider = st.radio(
         "KI-Provider auswählen",
         ["OpenAI (ChatGPT)", "Anthropic (Claude)"],
@@ -3558,22 +3598,33 @@ def page_llm_settings():
 
     if st.session_state.llm_provider == "openai":
         st.subheader("🔑 OpenAI-API-Key")
-        st.info("Den Key bekommst du im OpenAI-Dashboard unter 'API Keys'.")
-        st.session_state.openai_api_key = st.text_input(
-            "OpenAI API Key",
-            value=st.session_state.openai_api_key,
-            type="password",
-            help="Wird nur in der aktuellen Streamlit-Session gehalten.",
-        )
+        if has_openai_secret:
+            st.success("API-Key ist bereits in den Streamlit Secrets hinterlegt.")
+            # Zeige maskierten Key
+            key_preview = st.session_state.openai_api_key[:8] + "..." if len(st.session_state.openai_api_key) > 8 else "***"
+            st.text(f"Aktiver Key: {key_preview}")
+        else:
+            st.info("Den Key bekommst du im OpenAI-Dashboard unter 'API Keys'.")
+            st.session_state.openai_api_key = st.text_input(
+                "OpenAI API Key",
+                value=st.session_state.openai_api_key,
+                type="password",
+                help="Wird nur in der aktuellen Streamlit-Session gehalten.",
+            )
     else:
         st.subheader("🔑 Anthropic-API-Key")
-        st.info("Den Key bekommst du im Claude-Dashboard unter 'API Keys'.")
-        st.session_state.anthropic_api_key = st.text_input(
-            "Anthropic API Key",
-            value=st.session_state.anthropic_api_key,
-            type="password",
-            help="Wird nur in der aktuellen Streamlit-Session gehalten.",
-        )
+        if has_anthropic_secret:
+            st.success("API-Key ist bereits in den Streamlit Secrets hinterlegt.")
+            key_preview = st.session_state.anthropic_api_key[:8] + "..." if len(st.session_state.anthropic_api_key) > 8 else "***"
+            st.text(f"Aktiver Key: {key_preview}")
+        else:
+            st.info("Den Key bekommst du im Claude-Dashboard unter 'API Keys'.")
+            st.session_state.anthropic_api_key = st.text_input(
+                "Anthropic API Key",
+                value=st.session_state.anthropic_api_key,
+                type="password",
+                help="Wird nur in der aktuellen Streamlit-Session gehalten.",
+            )
 
     if st.button("🔌 Verbindung testen"):
         test_llm_connection()
