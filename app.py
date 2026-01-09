@@ -37,7 +37,7 @@ except ImportError:
 # ============================================================
 
 # App-Version
-APP_VERSION = "2.2.6"
+APP_VERSION = "2.3.0"
 APP_LAST_UPDATE = "2026-01-09"
 
 load_dotenv()  # .env-Datei laden, falls vorhanden
@@ -4731,19 +4731,22 @@ Erstelle jetzt {num_cards} Lernkarten basierend auf diesen Quellen."""
 
 
 def page_web_research():
-    """Seite für die Erstellung von Karteikarten durch Web-Recherche."""
-    st.title("🌐 Web-Recherche Karteikarten")
+    """Seite für die Erstellung von Karteikarten durch KI-Recherche."""
+    st.title("🤖 KI-Recherche Karteikarten")
 
     st.write("""
-    Erstelle Karteikarten zu jedem Thema – die KI recherchiert automatisch im Internet,
-    prüft mehrere Quellen und erstellt fundierte Lernkarten.
+    Erstelle Karteikarten zu jedem Thema – die KI recherchiert aus ihrem Fachwissen,
+    prüft Fakten aus mehreren Quellen und erstellt fundierte, verifizierte Lernkarten.
     """)
 
-    # Warnhinweis
-    st.info("""
-    **Hinweis:** Die KI sucht Informationen aus dem Internet und versucht, diese zu verifizieren.
-    Dennoch solltest du wichtige Fakten für Prüfungen immer mit deinen Lehrmaterialien abgleichen.
-    """)
+    # KI-Status prüfen
+    if st.session_state.get("llm_connection_status") != "ok":
+        api_key = st.session_state.get("openai_api_key", "")
+        if not api_key or len(api_key) < 10:
+            st.error("⚠️ Kein API-Key konfiguriert. Bitte zuerst in den **KI-Einstellungen** einen API-Key hinterlegen.")
+            return
+
+    st.success("✅ KI ist verbunden und bereit für die Recherche.")
 
     # Deck auswählen oder erstellen
     decks = db_get_decks(st.session_state.user_id)
@@ -4763,8 +4766,11 @@ def page_web_research():
             "Pflanzenkunde",
             "Handwerk",
             "Biologie",
-            "Geographie",
+            "Medizin",
+            "Rechtswissenschaften",
             "Geschichte",
+            "Geographie",
+            "Informatik",
             "Allgemeinwissen",
             "Andere"
         ], key="web_subject")
@@ -4796,183 +4802,197 @@ def page_web_research():
 
     st.markdown("---")
 
-    # Suchthema eingeben
-    st.subheader("🔍 Thema für Web-Recherche")
+    # Thema eingeben
+    st.subheader("📚 Thema für KI-Recherche")
 
     # Beispielthemen
     example_topics = {
         "Garten- und Landschaftsbau": [
             "Stauden für schattige Standorte",
             "Pflasterarbeiten Verlegemuster",
-            "Bodendecker für Hangbefestigung",
-            "Heckenpflanzen immergrün",
-            "Rasenanlage und Rasenpflege"
+            "Bodendecker für Hangbefestigung"
         ],
         "Pflanzenkunde": [
-            "Lavendel Arten und Pflege",
-            "Heimische Wildblumen Deutschland",
-            "Giftpflanzen im Garten erkennen",
-            "Obstbaumschnitt Grundlagen",
-            "Kräuter für die Küche"
+            "Heimische Laubbäume bestimmen",
+            "Giftpflanzen im Garten",
+            "Kräuter und ihre Verwendung"
         ],
         "Handwerk": [
             "Holzverbindungen Arten",
             "Mauerwerk Verbände",
-            "Dachziegel Arten",
-            "Elektroinstallation Grundlagen",
-            "Sanitär Grundlagen"
+            "Werkzeugkunde Grundlagen"
         ]
     }
 
-    # Beispielvorschläge anzeigen
-    examples = example_topics.get(subject, example_topics["Pflanzenkunde"])
-    st.caption(f"Beispiele: {', '.join(examples[:3])}")
+    examples = example_topics.get(subject, ["Grundlagen des Fachs", "Wichtige Begriffe", "Praxiswissen"])
+    st.caption(f"Beispiele: {', '.join(examples)}")
 
     search_topic = st.text_input(
-        "Suchthema eingeben",
-        placeholder="z.B. Stauden für sonnige Standorte",
-        help="Gib ein konkretes Thema ein, zu dem du Lernkarten erstellen möchtest."
+        "Thema eingeben",
+        placeholder="z.B. Heimische Laubbäume bestimmen und erkennen",
+        help="Die KI recherchiert zu diesem Thema und erstellt verifizierte Karteikarten."
     )
 
     # Erweiterte Optionen
     with st.expander("⚙️ Erweiterte Optionen"):
         col1, col2 = st.columns(2)
         with col1:
-            num_sources = st.slider("Anzahl Quellen", 3, 10, 5, help="Mehr Quellen = bessere Verifikation, aber längere Ladezeit")
             num_cards = st.slider("Anzahl Karten", 5, 50, 20)
+            difficulty = st.selectbox("Schwierigkeitsgrad", [
+                "Anfänger",
+                "Fortgeschritten",
+                "Examensniveau",
+                "Experte"
+            ])
         with col2:
-            card_format = st.selectbox("Kartenformat", [
-                ("Gemischt (MC + Freitext)", "mixed"),
-                ("Nur Multiple-Choice", "mc_only"),
-                ("Nur Freitext", "freetext_only")
-            ], format_func=lambda x: x[0])[1]
-
-            verify_sources = st.checkbox("Quellen verifizieren", value=True,
-                help="Bevorzugt vertrauenswürdige Fachseiten")
+            card_focus = st.selectbox("Schwerpunkt", [
+                "Gemischt (alle Typen)",
+                "Definitionen & Begriffe",
+                "Bestimmung & Erkennung",
+                "Prozesse & Abläufe",
+                "Typische Fehler & Verwechslungen"
+            ])
+            include_images = st.checkbox("Bildkarten-Vorschläge", value=True,
+                help="KI schlägt Bilder zur visuellen Bestimmung vor")
 
     st.markdown("---")
 
     # Recherche starten
-    if st.button("🚀 Recherche starten & Karten erstellen", type="primary", disabled=not search_topic):
+    if st.button("🚀 KI-Recherche starten", type="primary", disabled=not search_topic):
         if not search_topic:
-            st.error("Bitte gib ein Suchthema ein.")
+            st.error("Bitte gib ein Thema ein.")
             return
-
-        # Kategorisierung für Quellenprüfung
-        category = "garten" if subject in ["Garten- und Landschaftsbau", "Pflanzenkunde"] else \
-                   "handwerk" if subject == "Handwerk" else "allgemein"
 
         progress_bar = st.progress(0)
         status_text = st.empty()
 
         try:
-            # Schritt 1: Web-Suche
-            status_text.text(f"🔍 Suche nach: {search_topic}...")
-            progress_bar.progress(10)
-
-            # Zeige dem Nutzer was gesucht wird
-            st.info(f"🔍 **Suchbegriff:** {search_topic}")
-
-            # Direkte Suche mit dem Thema (ohne Zusätze die verwirren könnten)
-            search_results = search_web(search_topic, num_results=num_sources + 3)
-
-            if not search_results:
-                st.error(f"""
-                Keine Suchergebnisse für "{search_topic}" gefunden.
-
-                **Tipps:**
-                - Verwende einfachere Suchbegriffe
-                - Prüfe die Schreibweise
-                - Versuche: "Lavendel Pflege" statt "Lavandula angustifolia Kultivierung"
-                """)
-                return
-
-            st.success(f"**{len(search_results)} deutsche Webseiten gefunden**")
+            status_text.text("🤖 KI recherchiert und prüft Fakten...")
             progress_bar.progress(20)
 
-            # Schritt 2: Inhalte laden
-            status_text.text("📥 Lade Inhalte von Webseiten...")
+            # KI-Prompt erstellen
+            focus_map = {
+                "Gemischt (alle Typen)": "Mischung aus Definitionen, Prozessen, Bestimmung und typischen Fehlern",
+                "Definitionen & Begriffe": "Definitionen und Fachbegriffe",
+                "Bestimmung & Erkennung": "Bestimmung, Erkennung und Unterscheidungsmerkmale",
+                "Prozesse & Abläufe": "Prozesse, Abläufe und Arbeitsschritte",
+                "Typische Fehler & Verwechslungen": "Typische Fehler, Verwechslungen und häufige Irrtümer"
+            }
 
-            sources_with_content = []
-            source_status = st.empty()
+            image_instruction = """
+BILDKARTEN (5 Stück):
+Erstelle zusätzlich 5 Bildkarten für visuelle Bestimmung:
+- Beschreibe, welches Bild benötigt wird (z.B. "Foto einer Eiche im Herbst")
+- Liste 3-5 Erkennungsmerkmale auf dem Bild
+- Nenne typische Verwechslungen
+- Setze "card_type": "image_suggestion"
+""" if include_images else ""
 
-            for i, result in enumerate(search_results):
-                if len(sources_with_content) >= num_sources:
-                    break
+            system_prompt = f"""Du bist ein erfahrener „Karteikarten-Redakteur + Faktenprüfer" für das Fach {subject}.
 
-                url = result.get("url", "")
-                if not url:
-                    continue
+DEINE AUFGABE:
+Erstelle {num_cards} hochwertige, verifizierte Lernkarten zum Thema.
 
-                source_status.text(f"Lade: {result.get('title', url)[:50]}...")
+WICHTIGE REGELN FÜR QUELLEN & VERIFIKATION:
+1) Nutze Fachwissen aus zuverlässigen deutschsprachigen Quellen:
+   - Universitäten, Hochschulen, Forschungsinstitute
+   - Behörden, öffentliche Einrichtungen
+   - Fachgesellschaften, Verbände
+   - Botanische Gärten, Museen
+   - Etablierte Fachverlage, Fachportale
 
-                # Inhalt laden
-                page_data = fetch_page_content(url)
+2) Verifikation:
+   - Jede zentrale Aussage muss durch dein Fachwissen gestützt sein
+   - Bei unsicheren Fakten: Als "nicht vollständig verifiziert" kennzeichnen
+   - Keine Halluzination: Bei Unklarheit explizit sagen
 
-                if page_data["success"] and len(page_data["content"]) > 200:
-                    # Vertrauenswürdigkeit prüfen
-                    is_trusted, domain = is_trusted_source(url, category)
+3) Sprache: Deutsch
 
-                    sources_with_content.append({
-                        "title": page_data["title"] or result.get("title", ""),
-                        "url": url,
-                        "content": page_data["content"],
-                        "domain": domain,
-                        "trusted": is_trusted,
-                        "snippet": result.get("snippet", "")
-                    })
+KARTENFORMAT:
+- Niveau: {difficulty}
+- Schwerpunkt: {focus_map.get(card_focus, card_focus)}
+- Atomare Fragen mit präzisen Antworten
+- Mix aus: Freitext (Q/A), Multiple-Choice (mit 4 Optionen), Lückentext
 
-                progress_bar.progress(20 + int(40 * (i + 1) / len(search_results)))
-                time.sleep(0.5)  # Rate-Limiting
+{image_instruction}
 
-            source_status.empty()
+AUSGABEFORMAT (nur JSON-Array, keine Erklärungen):
+[
+  {{
+    "question": "Frage hier",
+    "answer": "Antwort hier",
+    "explanation": "Erklärung mit Quellenhinweis (z.B. 'Laut Fachliteratur...')",
+    "choices": ["Option A", "Option B", "Option C", "Option D"],
+    "correct_choice_index": 0,
+    "difficulty": 3,
+    "verification": "hoch/mittel/niedrig",
+    "tags": ["tag1", "tag2"],
+    "card_type": "standard"
+  }},
+  {{
+    "question": "Freitext-Frage ohne MC",
+    "answer": "Antwort",
+    "explanation": "Erklärung",
+    "choices": null,
+    "correct_choice_index": null,
+    "difficulty": 2,
+    "verification": "hoch",
+    "tags": ["tag1"],
+    "card_type": "standard"
+  }}
+]
 
-            if len(sources_with_content) < 2:
-                st.error("Nicht genügend Inhalte gefunden. Bitte versuche einen anderen Suchbegriff.")
-                return
+KRITISCH für Multiple-Choice:
+- "choices" muss 4 VOLLSTÄNDIGE Antworttexte enthalten
+- FALSCH: ["A", "B", "C", "D"]
+- RICHTIG: ["Eiche", "Buche", "Birke", "Ahorn"]
 
-            # Quellen anzeigen
-            st.subheader("📚 Gefundene Quellen")
-            for src in sources_with_content:
-                trust_badge = "✅ Vertrauenswürdig" if src["trusted"] else "⚠️ Nicht verifiziert"
-                st.markdown(f"- [{src['title'][:60]}...]({src['url']}) ({src['domain']}) - {trust_badge}")
+Erstelle jetzt {num_cards} Karten zum Thema."""
 
-            progress_bar.progress(60)
+            user_prompt = f"""THEMA: {search_topic}
+FACHBEREICH: {subject}
+NIVEAU: {difficulty}
+SCHWERPUNKT: {focus_map.get(card_focus, card_focus)}
+ANZAHL: {num_cards} Karten
 
-            # Schritt 3: Karten generieren
-            status_text.text("🤖 KI generiert Karteikarten aus den Quellen...")
+Beginne jetzt mit der Erstellung der verifizierten Karteikarten."""
 
-            # Sortiere Quellen: Vertrauenswürdige zuerst
-            if verify_sources:
-                sources_with_content.sort(key=lambda x: (not x["trusted"], -len(x["content"])))
+            progress_bar.progress(40)
+            status_text.text("🧠 KI erstellt verifizierte Karteikarten...")
 
-            raw_response = generate_cards_from_web_content(
-                topic=search_topic,
-                sources=sources_with_content,
-                num_cards=num_cards,
-                card_format=card_format,
-                subject=subject
-            )
+            # LLM aufrufen
+            max_tokens = min(4096 + (num_cards * 200), 16000)
+            raw_response = call_llm(system_prompt, user_prompt, max_tokens=max_tokens)
 
-            progress_bar.progress(85)
+            progress_bar.progress(80)
             status_text.text("💾 Speichere Karteikarten...")
 
             # JSON parsen
             json_match = re.search(r'\[.*\]', raw_response, re.DOTALL)
             if not json_match:
                 st.error("Fehler beim Parsen der KI-Antwort.")
-                st.code(raw_response[:500])
+                with st.expander("Debug-Info"):
+                    st.code(raw_response[:1000])
                 return
 
             cards_data = json.loads(json_match.group())
 
             # Karten speichern
             saved_count = 0
+            image_cards = 0
             for card_data in cards_data:
                 try:
-                    # Quellen als Teil der Erklärung hinzufügen
                     explanation = card_data.get("explanation", "")
-                    source_note = f"\n\n📚 Quellen: Web-Recherche zu '{search_topic}'"
+                    verification = card_data.get("verification", "mittel")
+                    verification_note = f"\n\n✅ Verifikation: {verification}"
+
+                    tags = card_data.get("tags", [])
+                    if isinstance(tags, list):
+                        tags = tags + ["ki-recherche"]
+                    else:
+                        tags = ["ki-recherche"]
+
+                    card_type = card_data.get("card_type", "standard")
 
                     card = Card(
                         id=0,
@@ -4981,16 +5001,19 @@ def page_web_research():
                         subject=subject,
                         question=card_data.get("question", ""),
                         answer=card_data.get("answer", ""),
-                        explanation=explanation + source_note,
+                        explanation=explanation + verification_note,
                         choices=card_data.get("choices"),
                         correct_choice_index=card_data.get("correct_choice_index"),
                         due_date=dt.date.today(),
-                        tags=["web-recherche", search_topic.lower().replace(" ", "-")[:20]]
+                        tags=tags,
+                        card_type=card_type
                     )
 
                     if card.question and card.answer:
                         db_insert_card(card)
                         saved_count += 1
+                        if card_type == "image_suggestion":
+                            image_cards += 1
                 except Exception as e:
                     st.warning(f"Karte übersprungen: {e}")
 
@@ -5003,8 +5026,8 @@ def page_web_research():
 
                 Die Karten wurden im Deck **{deck.name}** gespeichert.
 
-                📊 Quellen: {len(sources_with_content)} Webseiten analysiert
-                ✅ Davon vertrauenswürdig: {sum(1 for s in sources_with_content if s['trusted'])}
+                📊 Davon mit Bildvorschlägen: {image_cards}
+                🎯 Niveau: {difficulty}
                 """)
                 st.balloons()
 
@@ -5018,21 +5041,22 @@ def page_web_research():
         except Exception as e:
             st.error(f"Fehler bei der Verarbeitung: {e}")
             import traceback
-            st.code(traceback.format_exc())
+            with st.expander("Debug-Info"):
+                st.code(traceback.format_exc())
 
-    # Beispiel-Schnellauswahl
+    # Schnellstart-Themen
     st.markdown("---")
     st.subheader("💡 Schnellstart: Beliebte Themen")
 
     col1, col2, col3 = st.columns(3)
 
     popular_topics = [
-        ("🌸 Frühjahrsblüher", "Frühjahrsblüher Zwiebelpflanzen"),
-        ("🌿 Kräutergarten", "Küchenkräuter Anbau Verwendung"),
-        ("🪨 Natursteinmauer", "Natursteinmauer bauen Trockenmauer"),
-        ("🌳 Obstbäume", "Obstbäume Sorten Schnitt Pflege"),
-        ("🌺 Staudenbeete", "Staudenbeete anlegen planen"),
-        ("🏡 Rasenpflege", "Rasen anlegen pflegen mähen")
+        ("🌳 Laubbäume", "Heimische Laubbäume bestimmen"),
+        ("🌿 Stauden", "Stauden für verschiedene Standorte"),
+        ("🔧 Werkzeuge", "Gartenwerkzeuge und ihre Verwendung"),
+        ("🌺 Blumen", "Gartenblumen Arten und Pflege"),
+        ("🪨 Pflaster", "Pflasterarbeiten und Verlegemuster"),
+        ("🌱 Bodenkunde", "Bodenarten und Bodenverbesserung")
     ]
 
     for i, (label, topic) in enumerate(popular_topics):
@@ -5042,10 +5066,8 @@ def page_web_research():
                 st.session_state["quick_topic"] = topic
                 st.rerun()
 
-    # Quick-Topic verarbeiten
     if "quick_topic" in st.session_state:
-        st.info(f"Thema vorausgewählt: **{st.session_state['quick_topic']}**")
-        st.caption("Gib das Thema oben ein oder passe es an.")
+        st.info(f"💡 Thema vorausgewählt: **{st.session_state['quick_topic']}** - Trage es oben ein!")
 
 
 def page_image_cards():
@@ -5931,7 +5953,7 @@ def render_challenges_section():
 PAGES = {
     "🏠 Übersicht": page_home,
     "📄 Upload & Karten": page_upload_and_generate,
-    "🌐 Web-Recherche": page_web_research,
+    "🤖 KI-Recherche": page_web_research,
     "🧠 Karteikarten lernen": page_study_cards,
     "🌿 Bildkarten": page_image_cards,
     "📝 Lückentext (Cloze)": page_cloze_cards,
