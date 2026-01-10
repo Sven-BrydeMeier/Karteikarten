@@ -37,7 +37,7 @@ except ImportError:
 # ============================================================
 
 # App-Version
-APP_VERSION = "2.3.2"
+APP_VERSION = "2.4.0"
 APP_LAST_UPDATE = "2026-01-10"
 
 load_dotenv()  # .env-Datei laden, falls vorhanden
@@ -4309,6 +4309,58 @@ def image_to_base64(uploaded_file) -> str:
     return base64.b64encode(buffer.read()).decode('utf-8')
 
 
+def download_image_to_base64(url: str, max_size: int = 800) -> Optional[str]:
+    """
+    Lädt ein Bild von einer URL herunter und konvertiert es zu Base64.
+
+    Args:
+        url: Die Bild-URL (z.B. von Wikimedia Commons)
+        max_size: Maximale Bildgröße in Pixeln
+
+    Returns:
+        Base64-kodiertes Bild oder None bei Fehler
+    """
+    import io
+    from PIL import Image
+
+    try:
+        # Wikimedia Commons URLs ggf. anpassen
+        if "commons.wikimedia.org" in url and "/thumb/" not in url:
+            # Direkte Datei-URL verwenden
+            pass
+
+        headers = {
+            'User-Agent': 'SmartStudyCards/2.3 (Educational Flashcard App; Python/requests)'
+        }
+
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+
+        # Prüfen ob es ein Bild ist
+        content_type = response.headers.get('content-type', '')
+        if not content_type.startswith('image/'):
+            return None
+
+        # Bild laden und verkleinern
+        img = Image.open(io.BytesIO(response.content))
+
+        # Maximale Größe
+        img.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
+
+        # Als JPEG speichern
+        buffer = io.BytesIO()
+        if img.mode in ('RGBA', 'LA', 'P'):
+            img = img.convert('RGB')
+        img.save(buffer, format='JPEG', quality=85)
+        buffer.seek(0)
+
+        return base64.b64encode(buffer.read()).decode('utf-8')
+
+    except Exception as e:
+        st.warning(f"Bild konnte nicht geladen werden: {url} - {e}")
+        return None
+
+
 def display_card_image(image_data: str, caption: str = None):
     """Zeigt ein Base64-kodiertes Bild an."""
     if image_data:
@@ -4926,8 +4978,28 @@ def page_web_research():
                 "Prozesse & Abläufe",
                 "Typische Fehler & Verwechslungen"
             ])
-            include_images = st.checkbox("Bildkarten-Vorschläge", value=True,
-                help="KI schlägt Bilder zur visuellen Bestimmung vor")
+
+        st.markdown("---")
+        st.markdown("**🖼️ Bildkarten-Optionen:**")
+        col3, col4 = st.columns(2)
+        with col3:
+            create_image_cards = st.checkbox(
+                "Bildkarten erstellen",
+                value=False,
+                help="Erstellt echte Bildkarten mit Bildern aus Wikimedia Commons"
+            )
+        with col4:
+            if create_image_cards:
+                num_image_cards = st.slider("Anzahl Bildkarten", 3, 15, 5, key="num_img")
+            else:
+                num_image_cards = 0
+
+        if create_image_cards:
+            st.info("""
+            📷 **Bildkarten**: Die KI sucht passende Bilder aus Wikimedia Commons.
+            Die Bilder werden automatisch heruntergeladen und in den Karten gespeichert.
+            Ideal für: Pflanzenkunde, Werkzeugkunde, Materialkunde, etc.
+            """)
 
     st.markdown("---")
 
@@ -4953,14 +5025,39 @@ def page_web_research():
                 "Typische Fehler & Verwechslungen": "Typische Fehler, Verwechslungen und häufige Irrtümer"
             }
 
-            image_instruction = """
-BILDKARTEN (5 Stück):
-Erstelle zusätzlich 5 Bildkarten für visuelle Bestimmung:
-- Beschreibe, welches Bild benötigt wird (z.B. "Foto einer Eiche im Herbst")
-- Liste 3-5 Erkennungsmerkmale auf dem Bild
-- Nenne typische Verwechslungen
-- Setze "card_type": "image_suggestion"
-""" if include_images else ""
+            # Bildkarten-Instruktion basierend auf Auswahl
+            if create_image_cards and num_image_cards > 0:
+                image_instruction = f"""
+BILDKARTEN ({num_image_cards} Stück):
+Erstelle zusätzlich {num_image_cards} Bildkarten für visuelle Bestimmung.
+Für jede Bildkarte:
+1. Suche ein passendes Bild aus Wikimedia Commons
+2. Verwende die DIREKTE Bild-URL (Format: https://upload.wikimedia.org/wikipedia/commons/...)
+3. Die Frage ist: "Was ist auf dem Bild zu sehen?" oder "Welche Pflanze/Welches Werkzeug ist das?"
+4. Die Antwort ist der Name des abgebildeten Objekts
+5. Die Erklärung enthält Erkennungsmerkmale
+
+Bildkarten-Format:
+{{
+    "question": "Was ist auf diesem Bild zu sehen?",
+    "answer": "Name des Objekts (z.B. Eiche, Quercus robur)",
+    "explanation": "Erkennungsmerkmale: ...",
+    "image_url": "https://upload.wikimedia.org/wikipedia/commons/.../Datei.jpg",
+    "image_caption": "Kurze Bildbeschreibung",
+    "card_type": "image_question",
+    "difficulty": 2,
+    "verification": "hoch",
+    "tags": ["bildkarte", "bestimmung"]
+}}
+
+WICHTIG für Bild-URLs:
+- Nur Wikimedia Commons URLs verwenden
+- Direkte Bild-URLs (nicht die Beschreibungsseite)
+- Format: https://upload.wikimedia.org/wikipedia/commons/X/XX/Dateiname.jpg
+- Keine Thumbnail-URLs verwenden
+"""
+            else:
+                image_instruction = ""
 
             system_prompt = f"""Du bist ein erfahrener „Karteikarten-Redakteur + Faktenprüfer" für das Fach {subject}.
 
@@ -5023,11 +5120,16 @@ KRITISCH für Multiple-Choice:
 
 Erstelle jetzt {num_cards} Karten zum Thema."""
 
+            # User-Prompt mit optionaler Bildkarten-Anforderung
+            image_request = ""
+            if create_image_cards and num_image_cards > 0:
+                image_request = f"\nBILDKARTEN: {num_image_cards} Bildkarten mit Wikimedia Commons URLs erstellen"
+
             user_prompt = f"""THEMA: {search_topic}
 FACHBEREICH: {subject}
 NIVEAU: {difficulty}
 SCHWERPUNKT: {focus_map.get(card_focus, card_focus)}
-ANZAHL: {num_cards} Karten
+ANZAHL: {num_cards} Textkarten{image_request}
 
 Beginne jetzt mit der Erstellung der verifizierten Karteikarten."""
 
@@ -5053,8 +5155,11 @@ Beginne jetzt mit der Erstellung der verifizierten Karteikarten."""
 
             # Karten speichern
             saved_count = 0
-            image_cards = 0
-            for card_data in cards_data:
+            image_cards_count = 0
+            failed_images = 0
+
+            total_cards = len(cards_data)
+            for idx, card_data in enumerate(cards_data):
                 try:
                     explanation = card_data.get("explanation", "")
                     verification = card_data.get("verification", "mittel")
@@ -5068,6 +5173,23 @@ Beginne jetzt mit der Erstellung der verifizierten Karteikarten."""
 
                     card_type = card_data.get("card_type", "standard")
 
+                    # Bildkarten verarbeiten
+                    image_data = None
+                    image_caption = None
+                    image_url = card_data.get("image_url", "")
+
+                    if image_url and card_type == "image_question":
+                        status_text.text(f"📷 Lade Bild {idx + 1}/{total_cards}...")
+                        image_data = download_image_to_base64(image_url)
+                        if image_data:
+                            image_caption = card_data.get("image_caption", "")
+                            image_cards_count += 1
+                        else:
+                            failed_images += 1
+                            # Fallback: Karte als standard speichern wenn Bild nicht geladen werden kann
+                            card_type = "standard"
+                            explanation = f"[Bild konnte nicht geladen werden: {image_url}]\n\n" + explanation
+
                     card = Card(
                         id=0,
                         deck_id=deck.id,
@@ -5080,14 +5202,14 @@ Beginne jetzt mit der Erstellung der verifizierten Karteikarten."""
                         correct_choice_index=card_data.get("correct_choice_index"),
                         due_date=dt.date.today(),
                         tags=tags,
-                        card_type=card_type
+                        card_type=card_type,
+                        image_data=image_data,
+                        image_caption=image_caption
                     )
 
                     if card.question and card.answer:
                         db_insert_card(card)
                         saved_count += 1
-                        if card_type == "image_suggestion":
-                            image_cards += 1
                 except Exception as e:
                     st.warning(f"Karte übersprungen: {e}")
 
@@ -5095,13 +5217,18 @@ Beginne jetzt mit der Erstellung der verifizierten Karteikarten."""
             status_text.empty()
 
             if saved_count > 0:
+                # Erfolgsmeldung mit Bildkarten-Info
+                image_info = ""
+                if image_cards_count > 0:
+                    image_info = f"\n                🖼️ Davon Bildkarten: {image_cards_count}"
+                if failed_images > 0:
+                    image_info += f"\n                ⚠️ Bilder nicht geladen: {failed_images}"
+
                 st.success(f"""
                 ✅ **{saved_count} Karteikarten erstellt!**
 
                 Die Karten wurden im Deck **{deck.name}** gespeichert.
-
-                📊 Davon mit Bildvorschlägen: {image_cards}
-                🎯 Niveau: {difficulty}
+                🎯 Niveau: {difficulty}{image_info}
                 """)
                 st.balloons()
 
