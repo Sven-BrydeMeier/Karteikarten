@@ -37,8 +37,8 @@ except ImportError:
 # ============================================================
 
 # App-Version
-APP_VERSION = "2.3.1"
-APP_LAST_UPDATE = "2026-01-09"
+APP_VERSION = "2.3.2"
+APP_LAST_UPDATE = "2026-01-10"
 
 load_dotenv()  # .env-Datei laden, falls vorhanden
 
@@ -1709,19 +1709,21 @@ def get_secret(key: str, default: str = "") -> str:
     """
     # 1. Streamlit Secrets prüfen (Streamlit Cloud)
     try:
-        if hasattr(st, 'secrets'):
-            # Direkt unter dem Key-Namen
+        if hasattr(st, 'secrets') and len(st.secrets) > 0:
+            # Direkt unter dem Key-Namen (OPENAI_API_KEY)
             if key in st.secrets:
                 return str(st.secrets[key])
-            # Lowercase-Variante
+            # Lowercase-Variante (openai_api_key)
             if key.lower() in st.secrets:
                 return str(st.secrets[key.lower()])
-            # Unter [api_keys] oder [openai] Section
+            # Unter [api_keys] Section
             if "api_keys" in st.secrets and key in st.secrets["api_keys"]:
                 return str(st.secrets["api_keys"][key])
+            # Unter [openai] Section mit api_key
             if "openai" in st.secrets and "api_key" in st.secrets["openai"]:
                 if key == "OPENAI_API_KEY":
                     return str(st.secrets["openai"]["api_key"])
+            # Unter [anthropic] Section mit api_key
             if "anthropic" in st.secrets and "api_key" in st.secrets["anthropic"]:
                 if key == "ANTHROPIC_API_KEY":
                     return str(st.secrets["anthropic"]["api_key"])
@@ -1734,6 +1736,25 @@ def get_secret(key: str, default: str = "") -> str:
         return env_value
 
     return default
+
+
+def has_secret(key: str) -> bool:
+    """Prüft ob ein Secret existiert (in allen möglichen Formaten)."""
+    return len(get_secret(key, "")) > 0
+
+
+def get_available_secrets_info() -> dict:
+    """Gibt Debug-Info über verfügbare Secrets zurück."""
+    info = {"found_keys": [], "openai_loaded": False, "anthropic_loaded": False}
+    try:
+        if hasattr(st, 'secrets') and len(st.secrets) > 0:
+            # Alle Top-Level Keys auflisten (ohne Werte!)
+            info["found_keys"] = list(st.secrets.keys()) if hasattr(st.secrets, 'keys') else []
+            info["openai_loaded"] = has_secret("OPENAI_API_KEY")
+            info["anthropic_loaded"] = has_secret("ANTHROPIC_API_KEY")
+    except Exception as e:
+        info["error"] = str(e)
+    return info
 
 
 def init_llm_state():
@@ -3644,14 +3665,19 @@ def page_llm_settings():
     st.write("Hier wählst du, ob die App über OpenAI (ChatGPT) oder Anthropic (Claude) läuft und kannst den API-Key hinterlegen.")
 
     # Prüfen ob Secrets von Streamlit Cloud vorhanden sind
-    has_openai_secret = False
-    has_anthropic_secret = False
-    try:
-        if hasattr(st, 'secrets'):
-            has_openai_secret = "OPENAI_API_KEY" in st.secrets
-            has_anthropic_secret = "ANTHROPIC_API_KEY" in st.secrets
-    except Exception:
-        pass
+    secrets_info = get_available_secrets_info()
+    has_openai_secret = secrets_info.get("openai_loaded", False)
+    has_anthropic_secret = secrets_info.get("anthropic_loaded", False)
+
+    # Debug-Info anzeigen
+    with st.expander("🔍 Debug: Secret-Status", expanded=False):
+        st.json(secrets_info)
+        st.write(f"OpenAI Key geladen: {has_openai_secret}")
+        st.write(f"Anthropic Key geladen: {has_anthropic_secret}")
+        if st.session_state.get("openai_api_key"):
+            st.write(f"Session OpenAI Key: {st.session_state.openai_api_key[:10]}...")
+        else:
+            st.write("Session OpenAI Key: (leer)")
 
     if has_openai_secret or has_anthropic_secret:
         st.success("✅ **API-Keys aus Streamlit Cloud Secrets geladen!**")
@@ -3675,29 +3701,51 @@ def page_llm_settings():
 
     if st.session_state.llm_provider == "openai":
         st.subheader("🔑 OpenAI-API-Key")
-        if has_openai_secret:
-            st.success("API-Key ist bereits in den Streamlit Secrets hinterlegt.")
-            # Zeige maskierten Key
-            key_preview = st.session_state.openai_api_key[:8] + "..." if len(st.session_state.openai_api_key) > 8 else "***"
+        # Prüfe ob Key bereits in Session vorhanden (aus Secrets oder manuell)
+        current_key = st.session_state.get("openai_api_key", "")
+        if current_key and len(current_key) > 10:
+            st.success("✅ API-Key ist aktiv!")
+            key_preview = current_key[:8] + "..." if len(current_key) > 8 else "***"
             st.text(f"Aktiver Key: {key_preview}")
+            if has_openai_secret:
+                st.caption("(Aus Streamlit Secrets geladen)")
         else:
-            st.info("Den Key bekommst du im OpenAI-Dashboard unter 'API Keys'.")
+            st.warning("⚠️ Kein API-Key gefunden!")
+            st.info("""
+            **So hinterlegst du den Key in Streamlit Cloud:**
+
+            1. Gehe zu deiner App auf streamlit.io
+            2. Klicke auf "Settings" → "Secrets"
+            3. Füge hinzu: `OPENAI_API_KEY = "sk-dein-key-hier"`
+            4. Speichern und App neu laden
+            """)
             st.session_state.openai_api_key = st.text_input(
-                "OpenAI API Key",
+                "OpenAI API Key (manuell)",
                 value=st.session_state.openai_api_key,
                 type="password",
                 help="Wird nur in der aktuellen Streamlit-Session gehalten.",
             )
     else:
         st.subheader("🔑 Anthropic-API-Key")
-        if has_anthropic_secret:
-            st.success("API-Key ist bereits in den Streamlit Secrets hinterlegt.")
-            key_preview = st.session_state.anthropic_api_key[:8] + "..." if len(st.session_state.anthropic_api_key) > 8 else "***"
+        current_key = st.session_state.get("anthropic_api_key", "")
+        if current_key and len(current_key) > 10:
+            st.success("✅ API-Key ist aktiv!")
+            key_preview = current_key[:8] + "..." if len(current_key) > 8 else "***"
             st.text(f"Aktiver Key: {key_preview}")
+            if has_anthropic_secret:
+                st.caption("(Aus Streamlit Secrets geladen)")
         else:
-            st.info("Den Key bekommst du im Claude-Dashboard unter 'API Keys'.")
+            st.warning("⚠️ Kein API-Key gefunden!")
+            st.info("""
+            **So hinterlegst du den Key in Streamlit Cloud:**
+
+            1. Gehe zu deiner App auf streamlit.io
+            2. Klicke auf "Settings" → "Secrets"
+            3. Füge hinzu: `ANTHROPIC_API_KEY = "sk-ant-dein-key-hier"`
+            4. Speichern und App neu laden
+            """)
             st.session_state.anthropic_api_key = st.text_input(
-                "Anthropic API Key",
+                "Anthropic API Key (manuell)",
                 value=st.session_state.anthropic_api_key,
                 type="password",
                 help="Wird nur in der aktuellen Streamlit-Session gehalten.",
