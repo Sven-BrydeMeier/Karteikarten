@@ -37,7 +37,7 @@ except ImportError:
 # ============================================================
 
 # App-Version
-APP_VERSION = "2.4.0"
+APP_VERSION = "2.4.1"
 APP_LAST_UPDATE = "2026-01-10"
 
 load_dotenv()  # .env-Datei laden, falls vorhanden
@@ -6185,6 +6185,10 @@ def render_ki_status():
     provider = st.session_state.get("llm_provider", "openai")
     provider_name = "OpenAI" if provider == "openai" else "Claude"
 
+    # API-Key prüfen
+    api_key = st.session_state.get("openai_api_key", "") if provider == "openai" else st.session_state.get("anthropic_api_key", "")
+    has_key = api_key and len(api_key) > 10
+
     if status == "ok":
         # Grün - Verbunden
         st.sidebar.markdown(f"""
@@ -6193,29 +6197,20 @@ def render_ki_status():
             <span style="color: #155724; font-size: 14px;"><b>KI verbunden</b><br><small>{provider_name}</small></span>
         </div>
         """, unsafe_allow_html=True)
-    elif status is None:
-        # Grau - Nicht getestet
-        api_key = st.session_state.get("openai_api_key", "") if provider == "openai" else st.session_state.get("anthropic_api_key", "")
-        if api_key and len(api_key) > 10:
-            st.sidebar.markdown(f"""
-            <div style="display: flex; align-items: center; padding: 8px; background: #fff3cd; border-radius: 8px; margin-bottom: 10px;">
-                <span style="font-size: 20px; margin-right: 8px;">🟡</span>
-                <span style="color: #856404; font-size: 14px;"><b>KI bereit</b><br><small>Nicht getestet</small></span>
-            </div>
-            """, unsafe_allow_html=True)
-        else:
-            st.sidebar.markdown(f"""
-            <div style="display: flex; align-items: center; padding: 8px; background: #e2e3e5; border-radius: 8px; margin-bottom: 10px;">
-                <span style="font-size: 20px; margin-right: 8px;">⚪</span>
-                <span style="color: #6c757d; font-size: 14px;"><b>Kein API-Key</b><br><small>→ KI-Einstellungen</small></span>
-            </div>
-            """, unsafe_allow_html=True)
-    else:
-        # Rot - Fehler
+    elif has_key:
+        # Gelb - Key vorhanden, aber nicht verbunden/getestet
         st.sidebar.markdown(f"""
-        <div style="display: flex; align-items: center; padding: 8px; background: #f8d7da; border-radius: 8px; margin-bottom: 10px;">
-            <span style="font-size: 20px; margin-right: 8px;">🔴</span>
-            <span style="color: #721c24; font-size: 14px;"><b>KI-Fehler</b><br><small>→ KI-Einstellungen</small></span>
+        <div style="display: flex; align-items: center; padding: 8px; background: #fff3cd; border-radius: 8px; margin-bottom: 10px;">
+            <span style="font-size: 20px; margin-right: 8px;">🟡</span>
+            <span style="color: #856404; font-size: 14px;"><b>KI bereit</b><br><small>→ Verbindung testen</small></span>
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        # Grau - Kein API-Key
+        st.sidebar.markdown(f"""
+        <div style="display: flex; align-items: center; padding: 8px; background: #e2e3e5; border-radius: 8px; margin-bottom: 10px;">
+            <span style="font-size: 20px; margin-right: 8px;">⚪</span>
+            <span style="color: #6c757d; font-size: 14px;"><b>Kein API-Key</b><br><small>→ KI-Einstellungen</small></span>
         </div>
         """, unsafe_allow_html=True)
 
