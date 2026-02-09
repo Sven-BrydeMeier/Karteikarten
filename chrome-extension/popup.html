@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Smart Study Cards</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="app">
+    <!-- Header -->
+    <header class="header">
+      <div class="header-left">
+        <span class="logo">📚</span>
+        <h1>Smart Study Cards</h1>
+      </div>
+      <div class="header-right">
+        <span id="xp-badge" class="xp-badge" title="XP">0 XP</span>
+        <span id="streak-badge" class="streak-badge" title="Streak">🔥 0</span>
+      </div>
+    </header>
+
+    <!-- Connection Status -->
+    <div id="connection-status" class="status-bar status-disconnected">
+      <span class="status-dot"></span>
+      <span id="status-text">Nicht verbunden</span>
+    </div>
+
+    <!-- Tab Navigation -->
+    <nav class="tabs">
+      <button class="tab active" data-tab="study">🧠 Lernen</button>
+      <button class="tab" data-tab="create">➕ Erstellen</button>
+      <button class="tab" data-tab="decks">📦 Decks</button>
+    </nav>
+
+    <!-- Study Tab -->
+    <div id="tab-study" class="tab-content active">
+      <div id="study-empty" class="empty-state">
+        <p>📖</p>
+        <p>Keine fälligen Karten</p>
+        <small>Wähle ein Deck oder erstelle neue Karten</small>
+      </div>
+
+      <div id="study-card" class="study-card hidden">
+        <div class="card-meta">
+          <span id="card-subject" class="card-subject">Allgemein</span>
+          <span id="card-box" class="card-box">Box 1</span>
+        </div>
+        <div id="card-question" class="card-question"></div>
+
+        <!-- Free Text Answer -->
+        <div id="answer-input-area" class="answer-area">
+          <textarea id="answer-input" placeholder="Deine Antwort..." rows="3"></textarea>
+          <button id="btn-check-answer" class="btn btn-primary">Prüfen</button>
+        </div>
+
+        <!-- Multiple Choice -->
+        <div id="mc-choices" class="mc-choices hidden"></div>
+
+        <!-- Answer Reveal -->
+        <div id="answer-reveal" class="answer-reveal hidden">
+          <div class="answer-label">Antwort:</div>
+          <div id="card-answer" class="card-answer-text"></div>
+          <div id="card-explanation" class="card-explanation"></div>
+          <div class="answer-buttons">
+            <button id="btn-wrong" class="btn btn-wrong">✗ Falsch</button>
+            <button id="btn-hard" class="btn btn-hard">😐 Schwer</button>
+            <button id="btn-correct" class="btn btn-correct">✓ Richtig</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Study Progress -->
+      <div id="study-progress" class="study-progress hidden">
+        <div class="progress-bar">
+          <div id="progress-fill" class="progress-fill" style="width: 0%"></div>
+        </div>
+        <span id="progress-text" class="progress-text">0 / 0</span>
+      </div>
+    </div>
+
+    <!-- Create Tab -->
+    <div id="tab-create" class="tab-content hidden">
+      <div class="form-group">
+        <label>Deck</label>
+        <select id="create-deck-select">
+          <option value="">Deck wählen...</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Frage</label>
+        <textarea id="create-question" placeholder="Frage eingeben..." rows="3"></textarea>
+      </div>
+      <div class="form-group">
+        <label>Antwort</label>
+        <textarea id="create-answer" placeholder="Antwort eingeben..." rows="3"></textarea>
+      </div>
+      <div class="form-group">
+        <label>Erklärung (optional)</label>
+        <textarea id="create-explanation" placeholder="Zusätzliche Erklärung..." rows="2"></textarea>
+      </div>
+      <button id="btn-create-card" class="btn btn-primary btn-full">
+        📝 Karte erstellen
+      </button>
+      <div id="create-status" class="create-status hidden"></div>
+
+      <hr class="divider">
+
+      <h3 class="section-title">Neues Deck</h3>
+      <div class="form-group">
+        <label>Name</label>
+        <input id="new-deck-name" type="text" placeholder="Deckname...">
+      </div>
+      <div class="form-group">
+        <label>Fach</label>
+        <input id="new-deck-subject" type="text" placeholder="z.B. Informatik, Medizin...">
+      </div>
+      <div class="form-group">
+        <label>Thema</label>
+        <input id="new-deck-topic" type="text" placeholder="z.B. Datenstrukturen...">
+      </div>
+      <button id="btn-create-deck" class="btn btn-secondary btn-full">
+        📦 Deck erstellen
+      </button>
+    </div>
+
+    <!-- Decks Tab -->
+    <div id="tab-decks" class="tab-content hidden">
+      <div id="decks-list" class="decks-list">
+        <div class="empty-state">
+          <p>📦</p>
+          <p>Keine Decks vorhanden</p>
+          <small>Erstelle Decks in der App oder über den Tab "Erstellen"</small>
+        </div>
+      </div>
+    </div>
+
+    <!-- Footer -->
+    <footer class="footer">
+      <a href="#" id="btn-open-app" class="footer-link">App öffnen ↗</a>
+      <a href="#" id="btn-settings" class="footer-link">⚙️ Einstellungen</a>
+    </footer>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

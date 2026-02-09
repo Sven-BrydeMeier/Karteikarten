@@ -1,0 +1,58 @@
+/* ============================
+   Smart Study Cards - Content Script Styles
+   ============================ */
+
+.ssc-tooltip {
+  position: absolute;
+  z-index: 2147483647;
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  background: white;
+  border-radius: 10px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15), 0 0 0 1px rgba(0, 0, 0, 0.05);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  animation: ssc-fade-in 0.15s ease;
+}
+
+@keyframes ssc-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.ssc-tooltip-btn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 10px;
+  border: none;
+  border-radius: 7px;
+  background: none;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+  font-family: inherit;
+  color: #334155;
+  white-space: nowrap;
+  transition: background 0.15s;
+}
+
+.ssc-tooltip-btn:hover {
+  background: #f1f5f9;
+}
+
+.ssc-tooltip-card:hover {
+  background: #eef2ff;
+  color: #4f46e5;
+}
+
+.ssc-tooltip-question:hover {
+  background: #fef3c7;
+  color: #92400e;
+}
