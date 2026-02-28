@@ -1,115 +1,103 @@
 """
 Methode 7: prettymaps-inspiriert — Aquarell-Style
-Pastellfarben für Wasser, Land und Grünflächen.
-Ein künstlerischerer, weicherer Look.
+Pastellfarben: Sand-Beige Insel, blaues Meer, Grünflächen.
 """
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.patches import Polygon, FancyBboxPatch
-from matplotlib.collections import PatchCollection
+from matplotlib.patches import Polygon
 import numpy as np
 import sys, os
 sys.path.insert(0, os.path.dirname(__file__))
 from sylt_geodata import *
 
-# Farben
-BG = "#FAF6EE"       # Warmes Papier-Weiß
-WATER = "#AAD3DF"     # Wasser-Blau
-LAND = "#F2E8D5"      # Sand-Beige (Sylt!)
-GREEN = "#C8E6C2"     # Grünflächen
-ROAD_MAIN = "#4A4A4A"
-ROAD_MINOR = "#8A8A8A"
+BG = "#FAF6EE"
+WATER = "#AAD3DF"
+LAND = "#F2E8D5"
+GREEN = "#C8E6C2"
+ROAD_MAIN_COL = "#4A4A4A"
+ROAD_MINOR_COL = "#8A8A8A"
 COAST_EDGE = "#6B6B5E"
 
-fig, ax = plt.subplots(figsize=(12, 18), facecolor=BG)
-ax.set_facecolor(WATER)  # Alles "Wasser" als Hintergrund
-
-# Festland-Andeutung rechts (für Hindenburgdamm-Ende)
-mainland = Polygon(
-    [(8.78, 54.78), (8.92, 54.78), (8.92, 54.87), (8.78, 54.87)],
-    closed=True, facecolor=LAND, edgecolor=COAST_EDGE, linewidth=0.5
-)
-ax.add_patch(mainland)
+fig, ax = plt.subplots(figsize=(12, 20), facecolor=BG)
+ax.set_facecolor(WATER)
 
 # Insel Sylt — Sand/Beige
 coast_poly = Polygon(COASTLINE, closed=True, facecolor=LAND,
-                     edgecolor=COAST_EDGE, linewidth=1.0, zorder=2)
+                     edgecolor=COAST_EDGE, linewidth=0.8, zorder=2)
 ax.add_patch(coast_poly)
 
-# Grünflächen-Andeutung (Parks / Heide)
+# Grünflächen (Heide, Parks)
 green_areas = [
     # Braderuper Heide
-    [(8.3500, 54.9450), (8.3600, 54.9450), (8.3650, 54.9500),
-     (8.3600, 54.9550), (8.3500, 54.9550), (8.3450, 54.9500)],
+    [(8.350, 54.940), (8.360, 54.940), (8.365, 54.945),
+     (8.360, 54.950), (8.350, 54.950), (8.345, 54.945)],
     # Kampener Vogelkoje
-    [(8.3350, 54.9480), (8.3420, 54.9480), (8.3420, 54.9530), (8.3350, 54.9530)],
+    [(8.338, 54.950), (8.345, 54.950), (8.345, 54.955), (8.338, 54.955)],
     # Rantum Becken
-    [(8.3100, 54.8500), (8.3300, 54.8500), (8.3400, 54.8600),
-     (8.3200, 54.8700), (8.3100, 54.8600)],
+    [(8.305, 54.853), (8.320, 54.852), (8.330, 54.858),
+     (8.325, 54.865), (8.310, 54.862), (8.305, 54.858)],
+    # Morsum Kliff
+    [(8.405, 54.870), (8.415, 54.870), (8.420, 54.874),
+     (8.415, 54.878), (8.405, 54.876)],
 ]
 for ga in green_areas:
-    green_poly = Polygon(ga, closed=True, facecolor=GREEN, edgecolor="#8AB880",
-                         linewidth=0.3, alpha=0.6, zorder=2)
-    ax.add_patch(green_poly)
+    gp = Polygon(ga, closed=True, facecolor=GREEN, edgecolor="#8AB880",
+                 linewidth=0.2, alpha=0.5, zorder=2)
+    ax.add_patch(gp)
 
 # Hindenburgdamm
 hd_x, hd_y = zip(*HINDENBURGDAMM)
-ax.plot(hd_x, hd_y, color=ROAD_MAIN, linewidth=2.5, zorder=4,
+ax.plot(hd_x, hd_y, color=ROAD_MAIN_COL, linewidth=2.0, zorder=4,
         solid_capstyle="round")
-# Gleise-Andeutung (gestrichelt daneben)
-ax.plot(hd_x, [y + 0.002 for y in hd_y], color="#888888", linewidth=0.8,
-        linestyle="--", zorder=3, alpha=0.5)
 
 # Hauptstraßen
-ns_x, ns_y = zip(*ROAD_MAIN_NS)
-ax.plot(ns_x, ns_y, color=ROAD_MAIN, linewidth=1.8, zorder=4,
-        solid_capstyle="round")
-
-ew_x, ew_y = zip(*ROAD_EW_WESTERLAND)
-ax.plot(ew_x, ew_y, color=ROAD_MAIN, linewidth=1.3, zorder=4,
-        solid_capstyle="round")
+for road in [ROAD_L24, ROAD_EW_MAIN]:
+    rx, ry = zip(*road)
+    ax.plot(rx, ry, color=ROAD_MAIN_COL, linewidth=1.3, zorder=4,
+            solid_capstyle="round")
 
 # Nebenstraßen
 for street in ALL_MINOR_STREETS:
     sx, sy = zip(*street)
-    ax.plot(sx, sy, color=ROAD_MINOR, linewidth=0.5, zorder=3,
+    ax.plot(sx, sy, color=ROAD_MINOR_COL, linewidth=0.35, zorder=3,
             solid_capstyle="round")
 
-# Gebäude-Andeutung (kleine Rechtecke in Westerland)
+# Gebäude-Andeutung in Westerland
 np.random.seed(42)
-for i in range(60):
-    bx = 8.290 + np.random.random() * 0.035
-    by = 54.895 + np.random.random() * 0.020
-    size = 0.001 + np.random.random() * 0.001
+for _ in range(80):
+    bx = 8.287 + np.random.random() * 0.030
+    by = 54.896 + np.random.random() * 0.018
+    size = 0.0008 + np.random.random() * 0.0008
     building = plt.Rectangle((bx, by), size, size * 0.6,
                               facecolor="#D4C5A9", edgecolor="#B0A080",
-                              linewidth=0.2, zorder=3, alpha=0.7)
+                              linewidth=0.15, zorder=3, alpha=0.6)
     ax.add_patch(building)
 
 # Ortsnamen
 for name, (lon, lat) in PLACES.items():
-    ax.text(lon, lat, name, fontsize=6, color="#5A5A4A", ha="center",
+    ax.text(lon, lat, name, fontsize=5, color="#5A5A4A", ha="center",
             fontfamily="serif", fontstyle="italic", zorder=5)
 
 # Pin
-ax.plot(*PIN, marker="v", color="#CC3333", markersize=14, zorder=10)
-ax.annotate(PIN_LABEL, PIN, textcoords="offset points", xytext=(10, 10),
-            fontsize=8, color="#CC3333", fontweight="bold", fontfamily="serif",
+ax.plot(*PIN, marker="v", color="#CC3333", markersize=13, zorder=10)
+ax.annotate(PIN_LABEL, PIN, textcoords="offset points", xytext=(8, 10),
+            fontsize=7, color="#CC3333", fontweight="bold", fontfamily="serif",
             zorder=10)
 
 # Titel
-ax.set_title("SYLT", fontsize=36, fontweight="bold", color="#3A3A2A", pad=20,
+ax.set_title("SYLT", fontsize=34, fontweight="bold", color="#3A3A2A", pad=20,
              fontfamily="serif")
-ax.text(0.5, -0.015, "prettymaps-inspiriert  ·  Aquarell Style", transform=ax.transAxes,
-        ha="center", fontsize=9, color="#888870", fontfamily="serif")
+ax.text(0.5, -0.01, "prettymaps-inspiriert  \u00b7  Aquarell Style",
+        transform=ax.transAxes, ha="center", fontsize=8, color="#888870",
+        fontfamily="serif")
 
-ax.set_xlim(8.15, 8.90)
+ax.set_xlim(8.27, 8.48)
 ax.set_ylim(54.73, 55.07)
 ax.set_aspect(1.7)
 ax.set_axis_off()
 
-out = "/home/user/Karteikarten/street_map_art/output/07_prettymaps_sylt.png"
+out = os.path.join(os.path.dirname(__file__), "output", "07_prettymaps_sylt.png")
 fig.savefig(out, dpi=300, bbox_inches="tight", facecolor=BG)
 plt.close(fig)
 print(f"Gespeichert: {out}")
