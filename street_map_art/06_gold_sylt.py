@@ -1,6 +1,5 @@
 """
 Methode 6: Gold auf Schwarz — Luxus-Edition
-Goldene Straßenlinien auf schwarzem Grund.
 """
 import matplotlib
 matplotlib.use("Agg")
@@ -8,50 +7,37 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Polygon
 import sys, os
 sys.path.insert(0, os.path.dirname(__file__))
-from sylt_geodata import *
+import sylt_geodata as geo
+from plot_helpers import plot_streets
 
 GOLD_BRIGHT = "#DAA520"
 GOLD_MEDIUM = "#B8860B"
 GOLD_DARK = "#8B6914"
 GOLD_FAINT = "#5C4510"
-BG = "#000000"
 
-fig, ax = plt.subplots(figsize=(12, 20), facecolor=BG)
-ax.set_facecolor(BG)
+fig, ax = plt.subplots(figsize=(12, 20), facecolor="black")
+ax.set_facecolor("black")
 
-# Insel subtil
-coast_poly = Polygon(COASTLINE, closed=True, facecolor="#0A0800",
+coast_poly = Polygon(geo.COASTLINE, closed=True, facecolor="#0A0800",
                      edgecolor=GOLD_DARK, linewidth=0.5, zorder=1)
 ax.add_patch(coast_poly)
 
-# Hindenburgdamm
-hd_x, hd_y = zip(*HINDENBURGDAMM)
+hd_x, hd_y = zip(*geo.HINDENBURGDAMM)
 ax.plot(hd_x, hd_y, color=GOLD_BRIGHT, linewidth=2.0, zorder=3,
         solid_capstyle="round")
 
-# Hauptstraßen
-for road in [ROAD_L24, ROAD_EW_MAIN]:
-    rx, ry = zip(*road)
-    ax.plot(rx, ry, color=GOLD_BRIGHT, linewidth=1.5, zorder=3,
-            solid_capstyle="round")
+plot_streets(ax, geo,
+             color_major=GOLD_BRIGHT, color_medium=GOLD_MEDIUM, color_minor=GOLD_FAINT,
+             lw_major=1.5, lw_medium=0.5, lw_minor=0.2)
 
-# Nebenstraßen
-for street in ALL_MINOR_STREETS:
-    sx, sy = zip(*street)
-    ax.plot(sx, sy, color=GOLD_FAINT, linewidth=0.4, zorder=2,
-            solid_capstyle="round")
-
-# Ortsnamen
-for name, (lon, lat) in PLACES.items():
+for name, (lon, lat) in geo.PLACES.items():
     ax.text(lon, lat, name, fontsize=4.5, color=GOLD_DARK, ha="center",
             fontfamily="serif", fontstyle="italic", zorder=4)
 
-# Pin
-ax.plot(*PIN, marker="v", color="#FF3333", markersize=15, zorder=10)
-ax.annotate(PIN_LABEL, PIN, textcoords="offset points", xytext=(8, 10),
+ax.plot(*geo.PIN, marker="v", color="#FF3333", markersize=15, zorder=10)
+ax.annotate(geo.PIN_LABEL, geo.PIN, textcoords="offset points", xytext=(8, 10),
             fontsize=7, color="#FF3333", fontweight="bold", zorder=10)
 
-# Titel
 ax.text(0.5, 0.97, "S Y L T", transform=ax.transAxes, ha="center",
         fontsize=42, color=GOLD_BRIGHT, fontweight="bold", fontfamily="serif")
 ax.text(0.5, 0.957, "\u2014 DEUTSCHLAND \u2014", transform=ax.transAxes, ha="center",
@@ -65,6 +51,6 @@ ax.set_aspect(1.7)
 ax.set_axis_off()
 
 out = os.path.join(os.path.dirname(__file__), "output", "06_gold_sylt.png")
-fig.savefig(out, dpi=300, bbox_inches="tight", facecolor=BG)
+fig.savefig(out, dpi=300, bbox_inches="tight", facecolor="black")
 plt.close(fig)
 print(f"Gespeichert: {out}")

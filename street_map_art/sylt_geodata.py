@@ -111,13 +111,6 @@ def _generate_grid(lon_min, lon_max, lat_min, lat_max,
 # Westerland Kern (dichtes Raster)
 WESTERLAND_STREETS = _generate_grid(
     lon_min=8.2880, lon_max=8.3150,
-    lat_min=8.8960, lat_max=54.9140,  # FIXED below
-    lon_step=0.0012, lat_step=0.0008,
-    jitter=0.00005
-)
-# Fix: lat_min was wrong, regenerate properly
-WESTERLAND_STREETS = _generate_grid(
-    lon_min=8.2880, lon_max=8.3150,
     lat_min=54.8960, lat_max=54.9140,
     lon_step=0.0012, lat_step=0.0008,
     jitter=0.00005
@@ -247,15 +240,37 @@ ARCHSUM_STREETS = _generate_grid(
 )
 
 # ===================================================================
-# ALLE STRASSEN ZUSAMMEN
+# ALLE STRASSEN ZUSAMMEN (Fallback-Gitter)
 # ===================================================================
-ALL_MINOR_STREETS = (
+_FALLBACK_STREETS = (
     WESTERLAND_STREETS + WESTERLAND_OUTER +
     LIST_STREETS + KAMPEN_STREETS + WENNINGSTEDT_STREETS +
     TINNUM_STREETS + KEITUM_STREETS + MORSUM_STREETS +
     RANTUM_STREETS + HOERNUM_STREETS + MUNKMARSCH_STREETS +
     BRADERUP_STREETS + ARCHSUM_STREETS
 )
+
+# ===================================================================
+# OSM-CACHE: Echte Straßen verwenden wenn vorhanden
+# Erzeuge mit: python download_osm_streets.py
+# ===================================================================
+_osm_cache = os.path.join(_dir, 'osm_streets_cache.json')
+USE_REAL_OSM = os.path.exists(_osm_cache)
+
+if USE_REAL_OSM:
+    with open(_osm_cache) as _f:
+        _osm = json.load(_f)
+    OSM_MAJOR = [[tuple(p) for p in s] for s in _osm.get("major", [])]
+    OSM_MEDIUM = [[tuple(p) for p in s] for s in _osm.get("medium", [])]
+    OSM_MINOR = [[tuple(p) for p in s] for s in _osm.get("minor", [])]
+    ALL_MINOR_STREETS = OSM_MAJOR + OSM_MEDIUM + OSM_MINOR
+    _source = "OSM-Cache (echte Daten)"
+else:
+    OSM_MAJOR = []
+    OSM_MEDIUM = []
+    OSM_MINOR = []
+    ALL_MINOR_STREETS = _FALLBACK_STREETS
+    _source = "Fallback-Gitter (generiert)"
 
 # === ORTSNAMEN ===
 PLACES = {
@@ -273,9 +288,6 @@ PLACES = {
     "Hörnum":       (8.2920, 54.7640),
 }
 
-# Straßen-Statistik
-_total = len(ALL_MINOR_STREETS)
-print(f"Straßennetz geladen: {_total} Segmente, "
-      f"Westerland: {len(WESTERLAND_STREETS)+len(WESTERLAND_OUTER)}, "
-      f"List: {len(LIST_STREETS)}, Kampen: {len(KAMPEN_STREETS)}, "
-      f"Total Küstenpunkte: {len(COASTLINE)}")
+# Statistik
+print(f"Straßennetz [{_source}]: {len(ALL_MINOR_STREETS)} Segmente, "
+      f"Küste: {len(COASTLINE)} Punkte")
