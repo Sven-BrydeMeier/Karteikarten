@@ -37,8 +37,8 @@ except ImportError:
 # ============================================================
 
 # App-Version
-APP_VERSION = "2.4.1"
-APP_LAST_UPDATE = "2026-01-10"
+APP_VERSION = "2.4.2"
+APP_LAST_UPDATE = "2026-05-27"
 
 load_dotenv()  # .env-Datei laden, falls vorhanden
 
@@ -5638,7 +5638,7 @@ def page_multiplayer_hub():
 
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        current_rank = get_user_rank(stats.get("total_xp", 0))
+        current_rank = get_user_rank(stats.total_xp if stats else 0)
         st.markdown(f"""
         <div class="metric-card" style="text-align:center;">
             <div style="font-size:3rem;">{current_rank['icon']}</div>
@@ -5648,7 +5648,7 @@ def page_multiplayer_hub():
         """, unsafe_allow_html=True)
 
     with col2:
-        st.metric("Gesamte XP", f"{stats.get('total_xp', 0):,}")
+        st.metric("Gesamte XP", f"{stats.total_xp if stats else 0:,}")
 
     with col3:
         duels_won = profile.get("duels_won", 0) if isinstance(profile, dict) else 0
@@ -5662,7 +5662,7 @@ def page_multiplayer_hub():
 
     # Rang-Fortschritt
     st.markdown("### 📈 Rang-Fortschritt")
-    total_xp = stats.get("total_xp", 0)
+    total_xp = stats.total_xp if stats else 0
     current_rank_data = get_user_rank(total_xp)
 
     # Nächsten Rang finden
@@ -5980,9 +5980,9 @@ def render_active_duel():
 
         # XP gutschreiben
         stats = st.session_state.user_stats
-        new_xp = stats.get("total_xp", 0) + xp_earned
-        update_user_stats(st.session_state.user_id, {"total_xp": new_xp})
-        st.session_state.user_stats["total_xp"] = new_xp
+        if stats:
+            award_xp(stats, xp_earned)
+            db_update_user_stats(stats)
 
         st.info(f"💰 Verdiente XP: +{xp_earned}")
 
@@ -6089,8 +6089,9 @@ def render_challenges_section():
                 st.write(desc)
 
                 # Simulations-Fortschritt
+                user_stats = st.session_state.user_stats
                 if ch_type == "daily_cards":
-                    cards_today = st.session_state.user_stats.get("cards_learned_today", 0)
+                    cards_today = st.session_state.get("session_cards_correct", 0)
                     progress = min(cards_today / 10, 1.0)
                     st.progress(progress)
                     st.caption(f"{cards_today}/10 Karten heute gelernt")
@@ -6100,7 +6101,7 @@ def render_challenges_section():
                         st.balloons()
 
                 elif ch_type == "weekly_streak":
-                    current_streak = st.session_state.user_stats.get("current_streak", 0)
+                    current_streak = user_stats.current_streak if user_stats else 0
                     progress = min(current_streak / 7, 1.0)
                     st.progress(progress)
                     st.caption(f"{current_streak}/7 Tage Streak")
